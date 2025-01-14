@@ -234,10 +234,6 @@ class DarkHttpd {
   /** until we use the full signal set ability to pass our object we only allow one DarkHttpd per process.*/
   static DarkHttpd *forSignals; // trusting BSS zero to clear this.
 
-  DarkHttpd() {
-    forSignals = this;
-  }
-
   /** todo: this seems to have become the same as mime_mapping except for idiot checks */
   struct forward_mapping : std::map<const char *, const char *> {
     // const char *host, *target_url; /* These point at argv. */
@@ -495,6 +491,10 @@ public:
 #define DATE_LEN 30 /* strlen("Fri, 28 Feb 2003 00:02:08 GMT")+1 */
 
   const char *generated_on(const char date[DATE_LEN]) const;
+public:
+  DarkHttpd() {
+    forSignals = this;
+  }
 
   static void stop_running(int sig);
 

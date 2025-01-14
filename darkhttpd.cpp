@@ -24,8 +24,8 @@
  *
  * It has been heavily modified to make it a module that can be included in other programs.
  * todo: replace strduping the mimemap contents with loading and keeping the whole external mime list, malloc once instead of dozens of times.
- * todo: replace strduping string values extracted from the request, instead poke nulls and point into it.
- *
+ * todo: replace strduping string values extracted from the request, instead poke nulls and point into it => use StringView rather than null terminated strings, and write to file rather than string printf variants with all the reallcating.
+ * todo: epoll instead of select. Grr,no epoll on FreeBSD or NetBSD so we will use ppoll instead.
 */
 
 #include "darkhttpd.h"
