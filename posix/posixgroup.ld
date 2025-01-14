@@ -1,1 +1,0 @@
--Wl,--start-group -lposix -Wl,--end-group

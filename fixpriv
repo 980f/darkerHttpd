@@ -1,5 +1,0 @@
-## having to run qtcreator as root changes the privs on any files touched
-sudo chown -R andyh:andyh *
-cd /home/andyh/.config/QtProject/qtcreator
-sudo chown -R andyh:andyh *
-

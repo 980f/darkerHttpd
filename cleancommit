@@ -1,7 +1,0 @@
-## // *INDENT-OFF*  because we make changes to this file and uncrustify corrupts it
-## pre-commit hook runs with cwd repo root
-## git diff below lists files from repo root
-## git lists files that are staged, not sure why 'cached' is the literal value of the parameter: P
-## filter AMd gives us added and modified files, excludes deleted ones (else uncrustify fails on file not found and halts commit)
-## grepping to get rid of need for INDENT-OFF markers in all other controlled files.
-git diff --cached --name-only --diff-filter=AMd |  grep -e \.h -e \.cpp | xargs -I filename uncrustify -c safely.uncrustify --replace filename

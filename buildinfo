@@ -1,7 +1,0 @@
-echo -n \" >git.branch
-git branch | grep \* | cut -d\  -f2 | tr -d '\n' >>git.branch
-echo  \" >>git.branch
-
-echo -n \" >git.hash
-git rev-parse HEAD | tr -d '\n' >>git.hash
-echo  \" >>git.hash

@@ -1,3 +1,0 @@
-#allow access to any usb device, not a good idea but useful when first figuring out a new one
-SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", MODE="0666"
-
