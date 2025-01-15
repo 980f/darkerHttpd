@@ -24,6 +24,7 @@
  * PERFORMANCE OF THIS SOFTWARE.
  *
  * It has been heavily modified to make it a module that can be included in other programs.
+ * Added compile time defines: DarkerSingleFile define to non-zero value to include feature. Use a directory with just the one file in it, via a file link, rather than having lots of code in this program for such a rare occurrence. A file glob filter would be a better feature.
  */
 
 #pragma once
@@ -111,7 +112,7 @@ struct AutoString {
 
   /** @returns whether last char is @param slash*/
   bool endsWith(char slash) {
-    return pointer && length > 0 && slash == pointer[length -1];
+    return pointer && length > 0 && slash == pointer[length - 1];
   }
 
   /**
@@ -150,11 +151,9 @@ struct AutoString {
 
   AutoString(AutoString &&other) = delete;
 
-  unsigned int catf( const char *format, ...) {
-
+  unsigned int catf(const char *format, ...) {
     return length;
   }
-
 };
 
 /** a not-null terminated string that we can't alter through this object. This class exists so that we can sub-string without touching the orignal string OR copying it.*/
@@ -221,9 +220,9 @@ struct Inaddr6 : in6_addr {
   bool isMulticast() const;
 };
 
-struct SockAddr6:sockaddr_in6 {
-  Inaddr6 &addr6 ;
-  SockAddr6() : addr6(*reinterpret_cast<Inaddr6*>(&sin6_addr)) {}
+struct SockAddr6 : sockaddr_in6 {
+  Inaddr6 &addr6;
+  SockAddr6() : addr6(*reinterpret_cast<Inaddr6 *>(&sin6_addr)) {}
 
   bool presentationToNetwork(const char *bindaddr);
 };
@@ -255,15 +254,15 @@ public:
   class Fd { // a minimal one compared to safely/posix
   protected:
     int fd = -1;
-    FILE *stream=nullptr;
+    FILE *stream = nullptr;
 
   public:
-    FILE *getStream() {//this "create at need"
-      if (fd==-1) {
-        return nullptr;//todo: or perhaps spew to stderr?? This will likely segv.
+    FILE *getStream() { //this "create at need"
+      if (fd == -1) {
+        return nullptr; //todo: or perhaps spew to stderr?? This will likely segv.
       }
       if (stream == nullptr) {
-        stream=fdopen(fd,"wb");//using b as we must use network line endings, not the platform's idea of them
+        stream = fdopen(fd, "wb"); //using b as we must use network line endings, not the platform's idea of them
       }
       return stream;
     }
@@ -334,7 +333,7 @@ public:
     // ReSharper disable once CppNonExplicitConvertingConstructor
     Fd(int open) : fd(open) {}
 
-    size_t printf(const char*format ,...);
+    size_t printf(const char *format, ...);
   };
 
 
@@ -356,7 +355,7 @@ public:
     } state = DONE; // DONE makes it harmless so it gets garbage-collected if it should, for some reason, fail to be correctly filled out.
 
     /* char request[request_length+1] is null-terminated */
-    AutoString request;
+    AutoString request; //todo: 8000 byte buffer reused, or smaller if we are going to limit the functionality of the server to just file serving.
 
     /* request fields */
     AutoString method; // as in GET, POST, ...  //sub_string(request)
@@ -387,7 +386,7 @@ public:
 
     Fd header_fd;
 
-    AutoString reply = nullptr;//wil be replacing this with creating a temp file and then always sending header as a file then reply as a file. Later on we'll figure out how to merge them when the reply is internally generated.
+    AutoString reply = nullptr; //wil be replacing this with creating a temp file and then always sending header as a file then reply as a file. Later on we'll figure out how to merge them when the reply is internally generated.
     bool reply_dont_free = false;
     Fd reply_fd;
     off_t reply_start = 0;
@@ -396,15 +395,13 @@ public:
     off_t total_sent = 0;
     /* header + body = total, for logging */
   public:
-    Connection(DarkHttpd &parent,int fd);//only called via new in socket acceptor code.
+    Connection(DarkHttpd &parent, int fd); //only called via new in socket acceptor code.
 
     void clear();
 
     void recycle();
 
     void poll_check_timeout();
-
-    const char *keep_alive() const;
 
     void startHeader(int errcode, const char *errtext);
 
@@ -420,7 +417,7 @@ public:
 
     void catContentLength(off_t off);
 
-    void startCommonHeader(int errcode,const char *errtext,off_t contentLenght);
+    void startCommonHeader(int errcode, const char *errtext, off_t contentLenght);
 
     void catAuth();
 
@@ -456,9 +453,8 @@ public:
 
     void poll_send_reply();
 
-    void generate_dir_listing(const char *path, const char *decoded_url) ;
-
-  };//end of connection child class
+    void generate_dir_listing(const char *path, const char *decoded_url);
+  }; //end of connection child class
 
   void load_mime_map_file(const char *filename);
 
@@ -491,6 +487,7 @@ public:
 #define DATE_LEN 30 /* strlen("Fri, 28 Feb 2003 00:02:08 GMT")+1 */
 
   const char *generated_on(const char date[DATE_LEN]) const;
+
 public:
   DarkHttpd() {
     forSignals = this;
@@ -501,6 +498,26 @@ public:
   void reportStats() const;
 
   int main(int argc, char **argv);
+
+  /** time of latest event, in 3 formats. */
+  struct Now {
+  private:
+    time_t raw = 0;
+
+  public:
+    operator time_t() {
+      return raw;
+    }
+
+    time_t utc;
+    char image[DATE_LEN];
+
+    void refresh() {
+      raw = time(&utc); //twofer: both are set to the same value
+      //rfc11whatever format.
+      image[strftime(image, DATE_LEN, "%a, %d %b %Y %H:%M:%S GMT", gmtime(&utc))] = 0; // strftime returns number of chars it put into dest.
+    }
+  } now;
 
 private:
   Fd fd_null;
@@ -534,26 +551,10 @@ private:
    * removed from the connlist.
    */
   unsigned timeout_secs = 30;
-  AutoString keep_alive_field; //xasprintf but only ever filled from that one instance.
 
   /* Time is cached in the event loop to avoid making an excessive number of
    * gettimeofday() calls.
    */
-  struct Now {
-  private:
-    time_t raw=0;
-  public:
-    operator time_t() {
-      return raw;
-    }
-    time_t utc;
-    char image[DATE_LEN];
-    void refresh() {
-      raw = time(&utc);//twofer: both are set to the same value
-      //rfc11whatever format.
-      image[strftime(image, DATE_LEN, "%a, %d %b %Y %H:%M:%S GMT", gmtime(&utc))] = 0; // strftime returns number of chars it put into dest.
-    }
-  } now ;
 
   /* To prevent a malformed request from eating up too much memory, die once the
    * request exceeds this many bytes:
@@ -573,15 +574,16 @@ private:
   StringView default_mimetype{"application/octet-stream"}; //an argv or builtin constant
   /** file of mime mappings gets read into here.*/
   AutoString mimeFileContent;
+public: //while refactoring, about to eliminate all but one reference to it, via requiring CWD and serve from there, eventually load from file.
   StringView wwwroot; /* a path name */ //argv[1]  and even if we demonize it is still present
-
+private:
   char *logfile_name = nullptr; /* NULL = no logging */
   FILE *logfile = nullptr;
 
   /* [->] pidfile helpers, based on FreeBSD src/lib/libutil/pidfile.c,v 1.3
    * Original was copyright (c) 2005 Pawel Jakub Dawidek <pjd@FreeBSD.org>
    */
-  struct PidFiler:Fd {
+  struct PidFiler : Fd {
     char *file_name = nullptr; /* NULL = no pidfile */
 
     void remove();
@@ -591,8 +593,6 @@ private:
     int file_read();
 
     void create();
-
-
   } pid;
 
   bool want_chroot = false;
@@ -600,7 +600,10 @@ private:
   bool want_accf = false;
   bool want_keepalive = true;
   bool want_server_id = true;
+
+#if DarkerSingleFile
   bool want_single_file = false;
+#endif
 
   // AutoString server_hdr; //pkgname in building of replys //todo: replace with conditional sending of constant.
   AutoString auth_key; /* NULL or "Basic base64_of_password" */ //base64 expansion of a cli arg.
