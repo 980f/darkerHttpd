@@ -602,7 +602,7 @@ private:
   bool want_server_id = true;
   bool want_single_file = false;
 
-  AutoString server_hdr; //pkgname in building of replys //todo: replace with conditional sending of constant.
+  // AutoString server_hdr; //pkgname in building of replys //todo: replace with conditional sending of constant.
   AutoString auth_key; /* NULL or "Basic base64_of_password" */ //base64 expansion of a cli arg.
   //todo: load only from file, not commandline. Might even drop feature. Alternative is a std::vector of headers rather than a blob.
   std::vector<const char *> custom_hdrs; //parse_commandline concatenation of argv's with formatting. Should just record their indexes and generate on sending rather than cacheing here.
