@@ -35,19 +35,21 @@
 #endif
 #endif
 
-#include <cheaptricks.h>
+#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <forward_list>
+
 #include <locale>
 #include <map>
-#include <stdarg.h>
+
 #include <netinet/in.h>
 #include <unistd.h>
 #include <vector>
+#include <sys/stat.h>
 
 /** build options */
 #ifndef NO_IPV6
@@ -66,25 +68,42 @@
 #endif
 #endif
 
+/** a not-null terminated string that can be shrunk but not expanded. This class exists so that we can sub-string without touching the original string OR copying it.*/
 
-/** to help ensure timely frees.
- * Many people seem to not know that 'free' doesn't mind null pointers, it checks for them and does nothing so that we don't have to do that in a gazillion places.
- *
- * This frees what it has been given at constructor or by assignment when there is an assignment or a destruction. As such never assign to it from anything not malloc'd.
- */
-struct AutoString {
-  //these are exposed because we are mutating C code into C++ and hiding them is tedious. We should hide at least the pointer member, but there are a few contexts (*printf) where the implicit conversion doesn't get invoked.
+struct StringView {
   char *pointer = nullptr;
+  size_t length = 0;
+  size_t start = 0;
 
-  char &operator[](off_t offset) const {
-    static char fakechar;
-    if (!pointer) {
-      return fakechar;
+  StringView(char *pointer, size_t length = ~0, size_t start = 0): pointer{pointer},
+    length{length},
+    start{start} {
+    if (pointer && length == ~0) {
+      this->length = strlen(&pointer[start]);
     }
-    return pointer[offset];
   }
 
-  size_t length = 0;
+  StringView(char *begin, char *pastEnd): pointer{begin}, length(pastEnd > begin ? pastEnd - begin : 0) {}
+
+  StringView &operator=(char *str) {
+    pointer = str;
+    length = strlen(str);
+    start = 0;
+    return *this;
+  }
+
+  char *begin() const {
+    return &pointer[start];
+  }
+
+  /* @returns a pointer to the char just past the end,  ie you should use this with a pre-decrement if doing a search.*/
+  char *end(unsigned offset = 0) {
+    return &pointer[length - offset];
+  }
+
+  bool operator==(const char *) const {
+    return strncasecmp(begin(), "GET", length) == 0;
+  }
 
   operator char *() const {
     return pointer;
@@ -103,17 +122,167 @@ struct AutoString {
     return pointer == nullptr || length == 0;
   }
 
-  /**
-   * @param str is this what the string ends with?
-   * @param len length if known, else leave off or pass ~0 and strlen will be called on str
-   * @returns whether the internal string ends with str .
+  StringView subString(size_t start, size_t pastEnd) const {
+    //todo: argument checks, both must be less than length and their sum must be less than length.
+    if (start + pastEnd > length) {
+      return StringView(pointer + this->start + start, pastEnd - start);
+    }
+    return StringView(nullptr, 0, 0);
+  }
+
+  /** @returns pointer to byte after where this StringView's content was inserted. If this guy is trivial then this will be the same as @param bigenough which is where the contents of this object are copied into.
+   * @param honorNull is whether to stop inserting this guy if a null is found short of the length.
    */
+  // char *put(char *bigenough, bool honorNull = true) const;
+  char *put(char *bigenough, bool honorNull) const {
+    if (bigenough) {
+      if (pointer) {
+        if (length) {
+          for (size_t count = 0; count < length; ++count) {
+            *bigenough++ = pointer[count];
+            if (honorNull && !pointer[count]) {
+              break;
+            }
+          }
+        }
+      }
+      //this needs to be conditional for when we insert this guy into a right-sized hole inside *bigenough=0;
+    }
+    return bigenough;
+  }
+
+  /* @returns index of first instance of @param sought found looking backwards from @param searchpoint not including searchpoint itself, -1 if char not found. */
+  ssize_t lookBack(ssize_t searchpoint, char sought) const {
+    if (searchpoint > length) {
+      return -1; //Garbage in: act dumb.
+    }
+    while (--searchpoint >= 0) {
+      if (pointer[start + searchpoint] == sought) {
+        break;
+      }
+    }
+    return searchpoint;
+  }
+
+  ssize_t lookAhead(char sought) {
+    size_t looker = 0;
+    do {
+      if (pointer[start + looker] == sought) {
+        return looker;
+      }
+    } while (++looker < length) ;
+    return -1;
+  }
+
+  void chop(size_t moveStart) {
+    if (moveStart > length) {
+      start = length;
+      length = 0;
+      return;
+    }
+    start += moveStart;
+    length -= moveStart;
+  }
+
+  StringView cutToken(char termchar) {
+    if (notTrivial()) {
+      auto cutpoint = lookAhead(termchar);
+      if (cutpoint == -1) {
+        //todo: what do we do?
+      } else {
+        StringView token = StringView(pointer + start, length - cutpoint - 1); //limit new view as much as possible, no looking back in front of it.
+        chop(token.length);
+        return token;
+      }
+    }
+    return StringView(nullptr);
+  }
+
+  /** calls @see put then adds a terminator and returns a pointer to that terminator. */
+  char *cat(char *bigenough, bool honorNull) const {
+    auto end = put(bigenough, honorNull);
+    if (end) {
+      *end = 0;
+    }
+    return end;
+  }
+
+  size_t put(FILE *out) const {
+    return fwrite(pointer, length, 1, out); //#fputs requires a null terminator, this class exists to support not-null-terminated char arrays.
+  }
+
+  void trimTrailing(const char *trailers) {
+    if (pointer == nullptr) {
+      return;
+    }
+    while (length && strchr(trailers, pointer[start + length - 1])) {
+      --length;
+    }
+  }
+
+  char &operator[](size_t offset) {
+    static char buggem;
+    if (start + offset >= length) {
+      return *begin();//bad offset will point to first char which should surprise the programmer. The author of this code never makes this kind of error, he adds methods to this class for anything complex.
+    }
+    return pointer[start + offset];
+  }
+
+  /**
+    * @param str is this what the string ends with?
+    * @param len length if known, else leave off or pass ~0 and strlen will be called on str
+    * @returns whether the internal string ends with str .
+    */
   bool endsWith(const char *str, unsigned len = ~0) const;
 
   /** @returns whether last char is @param slash*/
-  bool endsWith(char slash) {
+  bool endsWith(char slash) const {
     return pointer && length > 0 && slash == pointer[length - 1];
   }
+
+  ssize_t findLast(const StringView &extension) {
+    if (notTrivial()&extension.notTrivial()) {//without checking extension length we could seek starting one byte past our allocation, probably harmless but easier to preclude than to verify.
+      if (extension.length < length) {
+        auto given = pointer + length - extension.length;
+
+        given = strrchr(given, ' '); //todo: allow tabs
+        if (given) {
+          if (strncmp(extension.begin(), given, extension.length) == 0) {
+            return given - begin();
+          }
+        }
+      }
+    }
+    return -1;
+  }
+
+  long long int cutNumber() {
+    char *start=begin();
+    char *end;
+    auto number=strtoll(start, &end, 10);
+    if (end == start) {
+      //nothing was there, no number was parsed
+      return 0;
+    }
+    chop(end - start);
+    return number;
+  }
+};
+
+/** to help ensure timely frees.
+ * Many people seem to not know that 'free' doesn't mind null pointers, it checks for them and does nothing so that we don't have to do that in a gazillion places.
+ *
+ * This frees what it has been given at constructor or by assignment when there is an assignment or a destruction. As such never assign to it from anything not malloc'd.
+ */
+struct AutoString : StringView {
+  // char *operator[](size_t offset)  {
+  //   static char fakechar;
+  //   if (!pointer) {
+  //     return &fakechar;
+  //   }
+  //   return &pointer[offset];
+  // }
+
 
   /**
    * @param str to append to end after reallocating room for it
@@ -123,7 +292,7 @@ struct AutoString {
   bool cat(const char *str, size_t len = ~0);
 
   /** construct around an allocated content. */
-  AutoString(char *pointer = nullptr, unsigned length = ~0) : pointer(pointer), length(length) {
+  AutoString(char *pointer = nullptr, unsigned length = ~0) : StringView(pointer, length) {
     if (pointer && length == ~0) {
       this->length = strlen(pointer);
     }
@@ -151,48 +320,21 @@ struct AutoString {
 
   AutoString(AutoString &&other) = delete;
 
-  unsigned int catf(const char *format, ...) {
+  AutoString(const StringView &view) : StringView{static_cast<char *>(::malloc(view.length + 1)), view.length} {
+    memcpy(pointer, view.begin(), view.length);
+    //todo: add terminating null
+  }
+
+  unsigned int ccatf(const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    //todo: all uses are going to go away so we aren't going to drag out vsprintf since we have such a class extending this one.
+    // auto newlength=snprintf(pointer, length, format,args);
+    va_end(args);
     return length;
   }
 };
 
-/** a not-null terminated string that we can't alter through this object. This class exists so that we can sub-string without touching the orignal string OR copying it.*/
-
-struct StringView {
-  const char *pointer = nullptr;
-  size_t length = 0;
-  size_t start = 0;
-
-  StringView(const char *pointer = nullptr, size_t length = ~0, size_t start = 0);
-
-  StringView &operator=(const char *str);
-
-  /** @returns pointer to byte after where this StringView's content was inserted. If this guy is trivial then this will be the same as @param bigenough.
-   * @param honorNull is whether to stop inserting this guy if a null is found short of the length.
-   */
-  char *put(char *bigenough, bool honorNull = true) const;
-
-  /** calls @see put then adds a terminator and returns a pointer to that terminator. */
-  char *cat(char *bigenough, bool honorNull = true) const;
-
-  size_t put(FILE *out) const;
-
-  const char *begin() const {
-    return pointer + start;
-  }
-
-  void trimTrailing(const char *trailers);
-
-  AutoString clone() const {
-    char *clone = static_cast<char *>(malloc(length + 1));
-    if (clone == nullptr) {
-      return AutoString();
-    }
-    memcpy(clone, begin(), length);
-    clone[length] = 0;
-    return AutoString(clone, length);
-  }
-};
 
 /** add conveniences to an in6_addr **/
 struct Inaddr6 : in6_addr {
@@ -233,7 +375,7 @@ class DarkHttpd {
   /** until we use the full signal set ability to pass our object we only allow one DarkHttpd per process.*/
   static DarkHttpd *forSignals; // trusting BSS zero to clear this.
 
-  /** todo: this seems to have become the same as mime_mapping except for idiot checks */
+  /** todo: replace with listmaker base class as linear search is more than fast enough. In fact, just do a string search after replacing cli args with file read.*/
   struct forward_mapping : std::map<const char *, const char *> {
     // const char *host, *target_url; /* These point at argv. */
     void add(const char *const host, const char *const target_url) {
@@ -243,8 +385,8 @@ class DarkHttpd {
     /** free contents, then forget them.*/
     void purge() {
       for (auto each: *this) {
-        free((void *) each.first);
-        free((void *) each.second);
+        free(const_cast<char *>(each.first));
+        free(const_cast<char *>(each.second));
       }
       clear();
     }
@@ -255,7 +397,8 @@ public:
   protected:
     int fd = -1;
     FILE *stream = nullptr;
-
+  public://temporary during code construction, this is carelessly cached.
+    size_t length = 0;
   public:
     FILE *getStream() { //this "create at need"
       if (fd == -1) {
@@ -273,7 +416,7 @@ public:
       return fd;
     }
 
-    bool seemsOk() {
+    bool seemsOk() const {
       return fd != -1;
     }
 
@@ -328,6 +471,21 @@ public:
 
     size_t putln(const char *content);
 
+    void unlink() {
+      //todo:close if not closed
+      close();
+    }
+
+    off_t getLength() {
+      if (seemsOk()) {
+        struct stat filestat;
+        if (fstat(fd, &filestat) == 0) {
+          return length= filestat.st_size;
+        }
+      }
+      return -1;
+    }
+
     Fd() = default;
 
     // ReSharper disable once CppNonExplicitConvertingConstructor
@@ -354,45 +512,88 @@ public:
       DONE /* connection closed, need to remove from queue */
     } state = DONE; // DONE makes it harmless so it gets garbage-collected if it should, for some reason, fail to be correctly filled out.
 
-    /* char request[request_length+1] is null-terminated */
-    AutoString request; //todo: 8000 byte buffer reused, or smaller if we are going to limit the functionality of the server to just file serving.
+    static constexpr size_t RequestSizeLimit = 8192; //vastly more than is needed for most GET'ing, this would only be small for a PUT and we will stream around the buffer by parsing as the content arrives and recognizing the PUT and the header boundary soon enough to do that.
+    char theRequest[RequestSizeLimit];
+    StringView received{theRequest, 0, 0}; //bytes in.
+    StringView parsed{theRequest, 0, 0}; //the part of the request that has been parsed so far.
+    // AutoString request;
+    struct Header {
+      const char *const name;
+      StringView value;
+
+      void clear() {
+        value.length = 0;
+      }
+
+      Header(const char *name): name(name), value{nullptr} {}
+    };
 
     /* request fields */
-    AutoString method; // as in GET, POST, ...  //sub_string(request)
-    AutoString url; //sub_string(request)
-    AutoString referer; //parse_field
-    AutoString user_agent; //parse_field
-    AutoString authorization; //parse_field
+    enum HttpMethods {
+      NotMine = 0, GET, HEAD,
+      // POST,PUT  //expose these only as we add code to support them.
+    } method;
+
+    StringView hostname; //this was missing in original server, that failed to do hostname checking that is nominally required by RFC7230
+    StringView url; //sub_string(request)
+    StringView referer; //parse_field
+    StringView user_agent; //parse_field
+    StringView authorization; //parse_field
+    StringView if_mod_since;
 
     //should structure this group, values come from parse_field
-    off_t range_begin = 0;
-    off_t range_end = 0;
-    bool range_begin_given = false;
-    bool range_end_given = false;
+    struct ByteRange {
+      struct Bound {
+        off_t number;//using signed for parsing convenience.
+        operator off_t() const {
+          return number;
+        }
 
-    AutoString header; //outgoing message, could replace with generator rather than cat strings together then sending block, in fact could fprintf to a temp file then netcat that file.
+        off_t operator =(long long int parsed) {
+          number = parsed;
+          return number;
+        }
+        bool given;
+        void recycle() {
+          number=0;
+          given=false;
+        }
+      };
+      Bound begin;
+      Bound end;
+      int parse(StringView headerline);
+      void recycle() {
+        begin.recycle();
+        end.recycle();
+      }
+    } range;
 
-    size_t header_sent = 0;
-    bool header_dont_free = false;
-    bool header_only = false;
-    int http_code = 0;
-    bool conn_closed = true;
+    bool conn_closed = true;//move this back to connection itself.
 
-    enum {
-      REPLY_GENERATED,
-      REPLY_FROMFILE,
-      REPLY_NONE
-    } reply_type = REPLY_NONE;
+    struct Replier {
+      bool header_only = false;
+      int http_code = 0;
 
-    Fd header_fd;
+      size_t header_sent = 0;
+      bool header_dont_free = false;
+      //with all replies and headers being done through files the only reply type info relevent is "header_only"
 
-    AutoString reply = nullptr; //wil be replacing this with creating a temp file and then always sending header as a file then reply as a file. Later on we'll figure out how to merge them when the reply is internally generated.
-    bool reply_dont_free = false;
-    Fd reply_fd;
-    off_t reply_start = 0;
-    off_t file_length = 0;
-    off_t reply_sent = 0;
-    off_t total_sent = 0;
+      Fd header_fd;
+      bool dont_free = false;
+      Fd content_fd;
+
+      off_t start = 0;
+      off_t file_length = 0;
+      off_t sent = 0;
+      off_t total_sent = 0;
+
+      void recycle();
+
+      off_t getContentLength() {
+        return content_fd.getLength();
+      }
+    } reply;
+
     /* header + body = total, for logging */
   public:
     Connection(DarkHttpd &parent, int fd); //only called via new in socket acceptor code.
@@ -431,15 +632,13 @@ public:
 
     void default_reply(int errcode, const char *errname, const char *format, ...) checkFargs(4, 5);
 
-    void redirect(const char *format, ...) checkFargs(2, 3);
+    void endReply();
 
-    char *parse_field(const char *field) const;
+    void redirect(const char *format, ...) checkFargs(2, 3);
 
     void redirect_https();
 
-    bool is_https_redirect() const;
-
-    void parse_range_field();
+    bool is_https_redirect;
 
     bool parse_request();
 
@@ -458,7 +657,7 @@ public:
 
   void load_mime_map_file(const char *filename);
 
-  StringView url_content_type(const char *url);
+  const char *url_content_type(const char *url);
 
   const char *get_address_text(const void *addr) const;
 
@@ -489,7 +688,7 @@ public:
   const char *generated_on(const char date[DATE_LEN]) const;
 
 public:
-  DarkHttpd() {
+  DarkHttpd(): mimeFileContent(nullptr), wwwroot{nullptr} {
     forSignals = this;
   }
 
@@ -505,7 +704,7 @@ public:
     time_t raw = 0;
 
   public:
-    operator time_t() {
+    operator time_t() const {
       return raw;
     }
 
@@ -525,11 +724,11 @@ private:
   struct PipePair {
     Fd fds[2];
 
-    int operator[](bool which) {
+    int operator[](bool which) const {
       return fds[which];
     }
 
-    bool connect() {
+    bool connect() const {
       int punned[2] = {fds[0], fds[1]};
       return pipe(punned) != -1;
     }
@@ -571,9 +770,10 @@ private:
 #ifdef HAVE_INET6
   bool inet6 = false; /* whether the socket uses inet6 */
 #endif
-  StringView default_mimetype{"application/octet-stream"}; //an argv or builtin constant
+  const char *default_mimetype=nullptr;
   /** file of mime mappings gets read into here.*/
   AutoString mimeFileContent;
+
 public: //while refactoring, about to eliminate all but one reference to it, via requiring CWD and serve from there, eventually load from file.
   StringView wwwroot; /* a path name */ //argv[1]  and even if we demonize it is still present
 private:
@@ -605,8 +805,12 @@ private:
   bool want_single_file = false;
 #endif
 
-  // AutoString server_hdr; //pkgname in building of replys //todo: replace with conditional sending of constant.
-  AutoString auth_key; /* NULL or "Basic base64_of_password" */ //base64 expansion of a cli arg.
+ struct Authorizer {
+
+   AutoString key; /* NULL or "Basic base64_of_password" */ //base64 expansion of a cli arg.
+   bool operator()(const char *authorization);
+ } auth;
+
   //todo: load only from file, not commandline. Might even drop feature. Alternative is a std::vector of headers rather than a blob.
   std::vector<const char *> custom_hdrs; //parse_commandline concatenation of argv's with formatting. Should just record their indexes and generate on sending rather than cacheing here.
 

@@ -30,6 +30,7 @@
 
 #include "darkhttpd.h"
 
+#include <cheaptricks.h>
 #include <iostream>
 
 
@@ -45,6 +46,7 @@ static const char copyright[] = "copyright (c) 2003-2024 Emil Mikulic"
 #ifdef __sun__
 #include <sys/sendfile.h>
 #endif
+static ssize_t send_from_file(int s, int fd, off_t ofs, size_t size);
 
 #include <arpa/inet.h>
 #include <cassert>
@@ -412,7 +414,7 @@ static char *make_safe_url(char *const url) {
 #undef ends
 }
 
-bool AutoString::endsWith(const char *str, unsigned len) const {
+bool StringView::endsWith(const char *str, unsigned len) const {
   if (len == ~0) {
     len = strlen(str);
   }
@@ -471,43 +473,6 @@ bool AutoString::malloc(size_t amount) {
   return pointer != nullptr;
 }
 
-char *StringView::put(char *bigenough, bool honorNull) const {
-  if (bigenough) {
-    if (pointer) {
-      if (length) {
-        for (size_t count = 0; count < length; ++count) {
-          *bigenough++ = pointer[count];
-          if (honorNull && !pointer[count]) {
-            break;
-          }
-        }
-      }
-    }
-    //this needs to be conditional for when we insert this guy into a right-sized hole inside *bigenough=0;
-  }
-  return bigenough;
-}
-
-char *StringView::cat(char *bigenough, bool honorNull) const {
-  auto end = put(bigenough, honorNull);
-  if (end) {
-    *end = 0;
-  }
-  return end;
-}
-
-size_t StringView::put(FILE *out) const {
-  return fwrite(pointer, length, 1, out);
-}
-
-void StringView::trimTrailing(const char *trailers) {
-  if (pointer == nullptr) {
-    return;
-  }
-  while (length && strchr(trailers, pointer[start + length - 1])) {
-    --length;
-  }
-}
 
 Inaddr6 &Inaddr6::clear() {
   for (auto index = 4; index-- > 0;) { //gcc converts this to a memset.
@@ -591,21 +556,6 @@ size_t DarkHttpd::Fd::printf(const char *format, ...) {
   return added;
 }
 
-///////////////////////////
-StringView::StringView(const char *pointer, size_t length, size_t start): pointer{pointer},
-  length{length},
-  start{start} {
-  if (pointer && length == ~0) {
-    this->length = strlen(&pointer[start]);
-  }
-}
-
-StringView &StringView::operator=(const char *str) {
-  pointer = str;
-  length = strlen(str);
-  start = 0;
-  return *this;
-}
 
 /* Default mimetype mappings
  * //todo: use xdg-mime on systems which have it
@@ -655,12 +605,7 @@ void DarkHttpd::load_mime_map_file(const char *filename) {
     if (fstat(fd, &filestat) == 0) {
       if (mimeFileContent.malloc(filestat.st_size)) {
         if (read(fd, mimeFileContent, filestat.st_size) == filestat.st_size) {
-          //null the whitespaces so as to make individual strings of each token.
-          for (auto killer = mimeFileContent.length; killer-- > 0;) { //using index so that we can tolerate input with nulls already present between tokens
-            if (strchr(" \t\r\n", mimeFileContent[killer])) { //need a sharable "isWhite"
-              mimeFileContent[killer] = 0;
-            }
-          }
+          //the malloc member put a null in so we should be ready to roll.
         } else {
           warn("File I/O issue loading mimetypes file, %s, content ignored", filename);
           mimeFileContent.Free();
@@ -671,36 +616,27 @@ void DarkHttpd::load_mime_map_file(const char *filename) {
 }
 
 
-StringView DarkHttpd::url_content_type(const char *url) {
-  if (url != nullptr) { // useful guard, and lets us get to the default of the default.
+const char *DarkHttpd::url_content_type(const char *url) {
+  if (url) {
     if (auto period = strrchr(url, '.')) {
-      const char *pool = mimeFileContent ? mimeFileContent : default_extension_map;
-      if (pool) { //always true unless someone deletes the built-in one.
-        auto nameLength = strlen(period);
-        size_t poolLength = mimeFileContent ? mimeFileContent.length : sizeof(default_extension_map);
-        for (const char *searcher = &pool[poolLength - nameLength]; searcher > pool;) {
-          if (*searcher == *period) { //found start of search item
-            if (strncasecmp(searcher, period, nameLength) == 0) { //name match
-              if (searcher[nameLength] != ':') { //not a synonym for a mime type
-                while (--searcher >= pool) { //read back for a ':'
-                  if (*searcher == ':') {
-                    //found end of mime string
-                    const char *end = searcher;
-                    while (--searcher > pool) {
-                      //search for white
-                      //and if so the one after it to one short of searcher is our mimetype
-                    }
-                  }
-                }
-              }
-            }
+      StringView extension = const_cast<char *>(++period);
+      StringView pool = mimeFileContent ? mimeFileContent : StringView(const_cast<char *>(default_extension_map)); //the const_cast seems dangerous, but we will get a segv if we screw up, we will not get a silent bug.
+      ssize_t foundAt = pool.findLast(extension);
+      if (foundAt >= 0) {
+        //todo: idiot check that this extension is not in the middle of any other extension nor inside a mimetype
+        auto mimeEnd = pool.lookBack(foundAt, ':');
+        if (mimeEnd) {
+          auto mimeStart = pool.lookBack(mimeEnd, '\n');
+          if (!mimeStart) {
+            mimeStart = 0;
           }
+          return pool.subString(mimeStart, mimeEnd);
         }
       }
     }
   }
   /* no period found in the string or extension not found in map */
-  return default_mimetype;
+  return default_mimetype ? default_mimetype : "application/octet-stream";
 }
 
 const char *DarkHttpd::get_address_text(const void *addr) const {
@@ -864,7 +800,7 @@ void DarkHttpd::usage(const char *argv0) {
   printf("\t--mimetypes filename (optional)\n"
     "\t\tParses specified file for extension-MIME associations.\n\n");
   printf("\t--default-mimetype string (optional, default: %s)\n"
-    "\t\tFiles with unknown extensions are served as this mimetype.\n\n", default_mimetype.pointer);
+    "\t\tFiles with unknown extensions are served as this mimetype.\n\n", default_mimetype);
   printf("\t--uid uid/uname, --gid gid/gname (default: don't privdrop)\n"
     "\t\tDrops privileges to given uid:gid after initialization.\n\n");
   printf("\t--chroot (default: don't chroot)\n"
@@ -1137,7 +1073,7 @@ bool DarkHttpd::parse_commandline(int argc, char *argv[]) {
       }
 
       AutoString key = reinterpret_cast<char *>(base64_encode(argv[i]));
-      xasprintf(auth_key, "Basic %s", key.pointer);
+      xasprintf(auth.key, "Basic %s", key.pointer);
     } else if (strcmp(argv[i], "--forward-https") == 0) {
       forward_to_https = true;
     } else if (strcmp(argv[i], "--header") == 0) {
@@ -1266,78 +1202,130 @@ void DarkHttpd::log_connection(const Connection *conn) {
   if (logfile == nullptr) {
     return;
   }
-  if (conn->http_code == 0) {
+  if (conn->reply.http_code == 0) {
     return; /* invalid - died in request */
   }
-  if (!conn->method) {
-    return; /* invalid - didn't parse - maybe too long */
-  }
-
-  // all the _safe macros can go away if we stream with a encoding translator in the stream instead of this malloc and free and explode methodology.
-#define make_safe(x)                                                    \
-  do {                                                                  \
-    if (conn->x) {                                                      \
-      safe_## x = static_cast<char *>(xmalloc(strlen(conn->x) * 3 + 1)); \
-      logencode(conn->x, safe_## x);                                     \
-    } else {                                                            \
-      safe_## x = NULL;                                                  \
-    }                                                                   \
-  } while (0)
-
-  make_safe(method);
-  make_safe(url);
-  make_safe(referer);
-  make_safe(user_agent);
-
-#undef make_safe
-
-#define use_safe(x) safe_## x ? safe_## x.pointer : ""
-  if (syslog_enabled) {
-    syslog(LOG_INFO, "%s - - %s \"%s %s HTTP/1.1\" %d %llu \"%s\" \"%s\"\n",
-      get_address_text(&conn->client),
-      clf_date(dest, now),
-      use_safe(method),
-      use_safe(url),
-      conn->http_code,
-      llu(conn->total_sent),
-      use_safe(referer),
-      use_safe(user_agent));
-  } else {
-    fprintf(logfile, "%s - - %s \"%s %s HTTP/1.1\" %d %llu \"%s\" \"%s\"\n",
-      get_address_text(&conn->client),
-      clf_date(dest, now),
-      use_safe(method),
-      use_safe(url),
-      conn->http_code,
-      llu(conn->total_sent),
-      use_safe(referer),
-      use_safe(user_agent));
-    fflush(logfile);
-  }
-
-#undef use_safe
+  //   if (!conn->method) {
+  //     return; /* invalid - didn't parse - maybe too long */
+  //   }
+  //
+  //   // all the _safe macros can go away if we stream with a encoding translator in the stream instead of this malloc and free and explode methodology.
+  // #define make_safe(x)                                                    \
+  //   do {                                                                  \
+  //     if (conn->x) {                                                      \
+  //       safe_## x = static_cast<char *>(xmalloc(strlen(conn->x) * 3 + 1)); \
+  //       logencode(conn->x, safe_## x);                                     \
+  //     } else {                                                            \
+  //       safe_## x = NULL;                                                  \
+  //     }                                                                   \
+  //   } while (0)
+  //
+  //   make_safe(method);
+  //   make_safe(url);
+  //   make_safe(referer);
+  //   make_safe(user_agent);
+  //
+  // #undef make_safe
+  //
+  // #define use_safe(x) safe_## x ? safe_## x.pointer : ""
+  //   if (syslog_enabled) {
+  //     syslog(LOG_INFO, "%s - - %s \"%s %s HTTP/1.1\" %d %llu \"%s\" \"%s\"\n",
+  //       get_address_text(&conn->client),
+  //       clf_date(dest, now),
+  //       use_safe(method),
+  //       use_safe(url),
+  //       conn->http_code,
+  //       llu(conn->total_sent),
+  //       use_safe(referer),
+  //       use_safe(user_agent));
+  //   } else {
+  //     fprintf(logfile, "%s - - %s \"%s %s HTTP/1.1\" %d %llu \"%s\" \"%s\"\n",
+  //       get_address_text(&conn->client),
+  //       clf_date(dest, now),
+  //       use_safe(method),
+  //       use_safe(url),
+  //       conn->http_code,
+  //       llu(conn->total_sent),
+  //       use_safe(referer),
+  //       use_safe(user_agent));
+  //     fflush(logfile);
+  //   }
+  //
+  // #undef use_safe
 }
 
-DarkHttpd::Connection::Connection(DarkHttpd &parent, int fd): service(parent), socket(fd) {
+/* Parse a Range: field into range_begin and range_end.  Only handles the
+ * first range if a list is given.  Sets range_{begin,end}_given to true if
+ * associated part of the range is given.
+ * "Range: bytes=500-999"
+ * "Range: - 456 last 456
+ * "Range: 789 -  from 789 to end
+ */
+
+int DarkHttpd::Connection::ByteRange::parse(StringView rangeline) {
+  //todo: allow range operand type default?
+  auto prefix = rangeline.cutToken('=');
+  if (!prefix) {
+    return 498;
+  }
+  if (prefix != "bytes") {
+    return 498; //todo: error range format not supported
+  }
+  recycle(); //COA, including annoying client giving us more than one Range header
+
+  begin = rangeline.cutNumber();
+  if (begin < 0) { // e.g. -456
+    end = -take(begin);
+    end.given = true;
+  } else {
+    begin.given = true;
+    if (rangeline[0] == '-') {
+      end = rangeline.cutNumber();
+      end.given = end > 0;
+    }
+    if (begin.given && end.given) {
+      if (end < begin) {
+        return 497;
+      }
+    }
+  }
+  //an additional range is presently not supported, we should return an error response.
+  return 499; //todo: proper value
+}
+
+void DarkHttpd::Connection::Replier::recycle() {
+  header_dont_free = false;
+  dont_free = false;
+  header_sent = 0;
+  header_only = false;
+  http_code = 0;
+  content_fd.forget(); // but it might be still open ?!
+  start = 0;
+  file_length = 0;
+  sent = 0;
+  total_sent = 0;
+}
+
+DarkHttpd::Connection::Connection(DarkHttpd &parent, int fd): socket(fd), service(parent), hostname{nullptr}, url{nullptr}, referer{nullptr}, user_agent{nullptr}, authorization{nullptr}, if_mod_since{nullptr} {
   memset(&client, 0, sizeof(client));
   nonblock_socket(socket);
   state = RECV_REQUEST;
   last_active = service.now;
 }
 
-/* Log a connection, then cleanly deallocate its internals. */
 void DarkHttpd::Connection::clear() {
-  request = nullptr;
-  method = nullptr;
+  received.length = 0; //forget the past request,
+  parsed.length = 0;
+  method = NotMine;
   url = nullptr;
   referer = nullptr;
   user_agent = nullptr;
   authorization = nullptr;
-  if (!header_dont_free) {
-    header = nullptr;
+  if (!reply.header_dont_free) {
+    reply.header_fd.unlink();
   }
-  if (!reply_dont_free) {
-    reply = nullptr;
+  if (!reply.dont_free) {
+    reply.content_fd.unlink();
   }
 }
 
@@ -1346,23 +1334,9 @@ void DarkHttpd::Connection::recycle() {
   clear(); //legacy, separate heap usage clear from the rest.
   debug("free_connection(%d)\n", int(socket));
   xclose(socket);
-  range_begin = 0;
-  range_end = 0;
-  range_begin_given = false;
-  range_end_given = false;
-
-  header_dont_free = false;
-  reply_dont_free = false;
-
-  header_sent = 0;
-  header_only = false;
-  http_code = 0;
-  conn_closed = true;
-  reply_fd.forget(); // but it might be still open ?!
-  reply_start = 0;
-  file_length = 0;
-  reply_sent = 0;
-  total_sent = 0;
+  range.recycle();
+  reply.recycle();
+  conn_closed = true; //todo: check original code
 
   state = RECV_REQUEST; /* ready for another */
 }
@@ -1437,39 +1411,45 @@ const char *DarkHttpd::generated_on(const char date[DATE_LEN]) const {
 
 
 void DarkHttpd::Connection::startHeader(const int errcode, const char *errtext) {
-  header_fd.printf("HTTP/1.1 %d %s\r\n", http_code = errcode, errtext);
+  if (errcode > 0) {
+    reply.http_code = errcode;
+  }
+  if (!errtext) {
+    errtext = ""; //don't want a "(null)" comment which is what some printf's do for a null pointer.
+  }
+  reply.header_fd.printf("HTTP/1.1 %d %s\r\n", reply.http_code, errtext);
 }
 
 void DarkHttpd::Connection::catDate() {
-  header_fd.printf("Date: %s\r\n", service.now.image);
+  reply.header_fd.printf("Date: %s\r\n", service.now.image);
 }
 
 void DarkHttpd::Connection::catServer() {
   if (service.want_server_id) {
-    header_fd.printf("Server: %s\r\n", pkgname);
+    reply.header_fd.printf("Server: %s\r\n", pkgname);
   }
 }
 
 void DarkHttpd::Connection::catFixed(const char *fixedText) {
-  header_fd.printf(fixedText);
+  reply.header_fd.printf(fixedText);
 }
 
 void DarkHttpd::Connection::catKeepAlive() {
   if (conn_closed) {
-    header_fd.printf("Connection: close\r\n");
+    reply.header_fd.printf("Connection: close\r\n");
   } else {
-    header_fd.printf("Keep-Alive: timeout=%d\r\n", service.timeout_secs);
+    reply.header_fd.printf("Keep-Alive: timeout=%d\r\n", service.timeout_secs);
   }
 }
 
 void DarkHttpd::Connection::catCustomHeaders() {
   for (auto custom_Hdr: service.custom_hdrs) {
-    header_fd.printf("%s\r\n", custom_Hdr);
+    reply.header_fd.printf("%s\r\n", custom_Hdr);
   }
 }
 
 void DarkHttpd::Connection::catContentLength(off_t off) {
-  header_fd.printf("Content-Length: %llu\r\n", llu(off));
+  reply.header_fd.printf("Content-Length: %llu\r\n", llu(off));
 }
 
 void DarkHttpd::Connection::startCommonHeader(int errcode, const char *errtext, off_t contentLenght = ~0UL) {
@@ -1486,31 +1466,33 @@ void DarkHttpd::Connection::startCommonHeader(int errcode, const char *errtext, 
 
 
 void DarkHttpd::Connection::catAuth() {
-  if (service.auth_key) {
-    header_fd.printf( //AI: "Authorization: Basic %s\r\n", service.auth_key); //leak our key to the world!!
+  if (service.auth.key) {
+    reply.header_fd.printf( //AI: "Authorization: Basic %s\r\n", service.auth_key); //leak our key to the world!!
       "WWW-Authenticate: Basic realm=\"User Visible Realm\"\r\n");
   }
 }
 
 void DarkHttpd::Connection::catGeneratedOn(bool toReply) {
   if (service.want_server_id) {
-    (toReply ? reply_fd : header_fd).printf("Generated by %s on %s\n", pkgname, service.now.image);
+    (toReply ? reply.content_fd : reply.header_fd).printf("Generated by %s on %s\n", pkgname, service.now.image);
   }
 }
 
 
 void DarkHttpd::Connection::endHeader() {
-  header_fd.printf("\r\n");
+  reply.header_fd.printf("\r\n");
 }
 
 void DarkHttpd::Connection::startReply(int errcode, const char *errtext) {
-  reply_fd.printf("<!DOCTYPE html><html><head><title>%d %s</title></head><body>\n" "<h1>%s</h1>\n", errcode, errtext, errtext);
+  //todo: open a tempfile
+
+  reply.content_fd.printf("<!DOCTYPE html><html><head><title>%d %s</title></head><body>\n" "<h1>%s</h1>\n", errcode, errtext, errtext);
 }
 
 void DarkHttpd::Connection::addFooter() {
-  reply_fd.putln("<hr>");
+  reply.content_fd.putln("<hr>");
   catGeneratedOn(true);
-  reply_fd.putln("</body></html>");
+  reply.content_fd.putln("</body></html>");
 }
 
 /* A default reply for any (erroneous) occasion. */
@@ -1518,19 +1500,25 @@ void DarkHttpd::Connection::default_reply(const int errcode, const char *errname
   startReply(errcode, errname);
   va_list va;
   va_start(va, format);
-  reply_fd.vprintln(format, va);
+  reply.content_fd.vprintln(format, va);
   va_end(va);
   addFooter();
+  endReply();
 
   //todo:file_length is not related to the file length!
-  startCommonHeader(errcode, errname, file_length);
+  startCommonHeader(errcode, errname, reply.file_length);
   catFixed("Content-Type: text/html; charset=UTF-8\r\n"); //todo: use catMime();
   catAuth();
   endHeader();
 
-  reply_type = REPLY_GENERATED;
+  reply.header_only = false;
   /* Reset reply_start in case the request set a range. */
-  reply_start = 0;
+  reply.start = 0;
+}
+
+void DarkHttpd::Connection::endReply() {
+  reply.content_fd.close();
+  reply.getContentLength();
 }
 
 void DarkHttpd::Connection::redirect(const char *format, ...) {
@@ -1538,49 +1526,48 @@ void DarkHttpd::Connection::redirect(const char *format, ...) {
 
   va_list va;
   va_start(va, format);
-  xvasprintf(where, format, va);
-  va_end(va);
 
-  startReply(http_code = 301, "Moved Permanently");
-  reply_fd.printf("Moved to: <a href=\"%s\">%s</a>\n", where.pointer, where.pointer); /* where x 2 */
+  startReply(reply.http_code = 301, "Moved Permanently");
+  reply.content_fd.printf("Moved to: <a href=\"%s\">%s</a>\n", where.pointer, where.pointer); /* where x 2 */
+
   addFooter();
+  endReply();
 
   startHeader(301, "Moved Permanently");
-  reply_fd.printf("Date: %s\r\n", service.now.image);
+  reply.content_fd.printf("Date: %s\r\n", service.now.image);
   catServer();
 
   /* "Accept-Ranges: bytes\r\n" - not relevant here */
-  reply_fd.printf("Location: %s\r\n", where.pointer);
+  reply.content_fd.printf("Location: %s\r\n", where.pointer);
   catKeepAlive();
   catCustomHeaders();
-  catContentLength(file_length); //todo:suspicious, is either 0 or stale.
+  catContentLength(reply.file_length);
   catFixed("Content-Type: text/html; charset=UTF-8\r\n"); //todo: use catMime();
   //no auth?
   endHeader();
-  reply_type = REPLY_GENERATED;
 }
 
-/* Parses a single HTTP request field.  Returns string from end of [field] to
- * first \r, \n or end of request string.  Returns NULL if [field] can't be
- * matched.  Case insensitive.
- *
- * You need to remember to deallocate the result.
- * example: parse_field(conn, "Referer: ");
- */
-char *DarkHttpd::Connection::parse_field(const char *field) const {
-  /* find start */
-  char *pos = strcasestr(request, field);
-  if (pos == nullptr) {
-    return nullptr;
-  }
-  pos += strlen(field); //char just past end of 'field'
-  /* find end of line */
-  auto eol = strpbrk(pos, "\r\n");
-  if (!eol) { //already null terminated, just dup it
-    return strdup(pos);
-  }
-  return sub_string(pos, eol);
-}
+// /* Parses a single HTTP request field.  Returns string from end of [field] to
+//  * first \r, \n or end of request string.  Returns NULL if [field] can't be
+//  * matched.  Case insensitive.
+//  *
+//  * You need to remember to deallocate the result.
+//  * example: parse_field(conn, "Referer: ");
+//  */
+// char *DarkHttpd::Connection::parse_field(const char *field) const {
+//   /* find start */
+//   char *pos = strcasestr(request, field);
+//   if (pos == nullptr) {
+//     return nullptr;
+//   }
+//   pos += strlen(field); //char just past end of 'field'
+//   /* find end of line */
+//   auto eol = strpbrk(pos, "\r\n");
+//   if (!eol) { //already null terminated, just dup it
+//     return strdup(pos);
+//   }
+//   return sub_string(pos, eol);
+// }
 
 void DarkHttpd::Connection::redirect_https() {
   /* work out path of file being requested */
@@ -1592,115 +1579,97 @@ void DarkHttpd::Connection::redirect_https() {
     return;
   }
 
-  AutoString host(parse_field("Host: "));
-  if (host == nullptr) {
-    default_reply(400, "Bad Request",
-      "Missing 'Host' header.");
+
+  if (!hostname) {
+    default_reply(400, "Bad Request", "Missing 'Host' header.");
     return;
   }
-  redirect("https://%s%s", host.pointer, url.pointer);
+  redirect("https://%s%s", hostname.pointer, url.pointer);
 }
 
-bool DarkHttpd::Connection::is_https_redirect() const {
-  if (service.forward_to_https == false) {
-    return false; /* --forward-https was never used */
-  }
 
-  AutoString proto(parse_field("X-Forwarded-Proto: "));
-  if (proto == nullptr || strcasecmp(proto, "https") == 0) {
-    return false;
-  }
-  return true;
-}
-
-/* Parse a Range: field into range_begin and range_end.  Only handles the
- * first range if a list is given.  Sets range_{begin,end}_given to true if
- * associated part of the range is given.
- * "Range: bytes=500-999"  is all that was supported, changing to also accept:
- * "Range: - 456 last 456
- * "Range: 789 -
- * todo: strtok walk with "=-,\r\n"
- */
-void DarkHttpd::Connection::parse_range_field() {
-  AutoString range(parse_field("Range: bytes="));
-  if (!range) {
-    return;
-  }
-  range_end_given = range_begin_given = false; //ensure erased any prior attempt
-  char *end = nullptr;
-  range_begin = strtoll(range, &end, 10);
-  range_begin_given = end > range; //and we already parsed it
-  /* parse number up to hyphen */
-  if (range_begin < 0) { // Range -456, no white space after
-    //offset is from end of file
-  }
-  if (*end == '-') {
-    range_end = strtoll(++end, &end, 10);
-    if (*end != ',') {
-      range_end = 0; //forget old as well as reject new
-      return; /* must be end of string or a list to be valid */
-    }
-    range_end_given = range_end != 0;
-    return; /* we are done, "from here to end of file" is being requested */
-  }
-
-  //behaves differently on case "2134234-0," where it should give an closed and invalid range but it instead gives an end of 0
-}
-
-/* Parse an HTTP request like "GET / HTTP/1.1" to get the method (GET), the
+/* Parse an HTTP request like "GET /urlGoes/here HTTP/1.1" to get the method (GET), the
  * url (/), the referer (if given) and the user-agent (if given).  Remember to
  * deallocate all these buffers.  The method will be returned in uppercase.
  */
 bool DarkHttpd::Connection::parse_request() {
-  assert(request.notTrivial());
-
   /* parse method */
-  auto firstspace = strchr(request, ' ');
-
-  method = sub_string(request, firstspace);
-  method.toUpper();
-
-  /* parse url */
-  const char *nextspace = strchr(++firstspace, ' ');
-
-  if (!nextspace) {
-    return false; /* fail */
+  StringView scanner = theRequest;
+  auto methodToken = scanner.cutToken(' ');
+  if (!methodToken) {
+    return false; //garble or too short to process
   }
-  const char *end = strpbrk(nextspace, " \r\n");
-  url = sub_string(nextspace, end);
+  if (methodToken == "GET") { //980f is being sloppy and using a case ignoring compare here, while RFC7230 says it must be case matched.
+    method = GET;
+  } else if (methodToken == "HEAD") {
+    method = HEAD;
+  } else {
+    method = NotMine;
+  }
 
-  /* parse protocol to determine conn_closed */
-  if (*end == ' ') {
-    nextspace = removeLeadingWhitespace(end);
-    end = strpbrk(nextspace, " \r\n"); //old code insisted on \r, without safety of \n
+  url = scanner.cutToken(' ');
+  if (!url) {
+    return false;
+  }
+  auto proto = scanner.cutToken('\n');
+  proto.trimTrailing(" \t\r\n");
+  //todo: check for http.1.
 
-    AutoString proto(sub_string(nextspace, end));
-    if (strcasecmp(proto, "HTTP/1.1") == 0) {
-      conn_closed = false;
+  //time to parse headers, as they arrive.
+  do {
+    auto headerline = scanner.cutToken('\n');
+    auto headername = headerline.cutToken(':');
+    //#per RFC do NOT trim trailing, we want to not get a match if someone is giving us invalid header names.
+    if (!headername) {
+      //todo:distinguish eof from end of header
+      break;
     }
-  }
-
-  /* parse connection field */
-  AutoString tmp(parse_field("Connection: "));
-  if (tmp) {
-    if (strcasecmp(tmp, "close") == 0) {
-      conn_closed = true;
-    } else if (strcasecmp(tmp, "keep-alive") == 0) {
-      conn_closed = false;
+    if (headername == "Referer") {
+      referer = headerline;
+      continue;
     }
-  }
+    if (headername == "User-Agent") {
+      user_agent = headerline;
+      continue;
+    }
+    if (headername == "Authorization") {
+      authorization = headerline;
+      continue;
+    }
+    if (headername == "If-Modified-Since") {
+      if_mod_since = headerline;
+      continue;
+    }
+    if (headername == "Host") {
+      hostname = headerline;
+      continue;
+    }
+    if (headername == "X-Forwarded-Proto") {
+      auto proto = headerline;
+      is_https_redirect == !proto || strcasecmp(proto, "https") == 0;
+      continue;
+    }
+    if (headername == "Connection") {
+      headerline.trimTrailing(" \t\r\n");
+      if (headerline == "close") {
+        //todo: conn_closed = true;
+      } else if (headerline == "keep-alive") {
+        //todo: conn_closed = false;
+      }
+      continue;
+    }
+    //future possiblities: Content-Length: for put's or push's
+    if (headername == "Range") {
+      range.parse(headerline);
+    }
+  } while (scanner.notTrivial());
+  //
+  // /* cmdline flag can be used to deny keep-alive */
+  // if (!service.want_keepalive) {
+  //   conn_closed = true;
+  // }
 
-  /* cmdline flag can be used to deny keep-alive */
-  if (!service.want_keepalive) {
-    conn_closed = true;
-  }
-
-  /* parse important fields */
-  referer = parse_field("Referer: ");
-  user_agent = parse_field("User-Agent: ");
-  authorization = parse_field("Authorization: ");
-  parse_range_field();
-  return 1;
+  return true;
 }
 
 static bool file_exists(const char *path) {
@@ -1904,7 +1873,7 @@ public:
 
   DirLister(DarkHttpd::Connection &conn) : conn{conn} {}
 
-//was generate_dir_listing
+  //was generate_dir_listing
   void operator()(const char *path, const char *decoded_url) {
     size_t maxlen = 3; /* There has to be ".." */
 
@@ -1993,15 +1962,12 @@ public:
     append(listing, conn.service.generated_on(conn.service.now.image));
     append(listing, "</body>\n</html>\n");
 
-    conn.reply = listing->str;
-    // conn.reply_length = (off_t) listing->length;
+    conn.endReply();
     free(listing); /* don't free inside of listing */
 
-    conn.startCommonHeader(200, "OK", conn.reply.length);
-
+    conn.startCommonHeader(200, "OK", conn.reply.file_length);
     conn.catFixed("Content-Type: text/html; charset=UTF-8\r\n");
     conn.endHeader();
-    conn.reply_type = DarkHttpd::Connection::REPLY_GENERATED;
   }
 };
 
@@ -2028,10 +1994,9 @@ void DarkHttpd::Connection::process_get() {
   const char *forward_to = nullptr;
   /* test the host against web forward options */
   if (service.forward_map.size() > 0) {
-    AutoString host(parse_field("Host: "));
-    if (host) {
-      debug("host=\"%s\"\n", host.pointer);
-      forward_to = service.forward_map.at(host);
+    if (hostname.notTrivial()) {
+      debug("host=\"%s\"\n", hostname.pointer);
+      forward_to = service.forward_map.at(hostname);
     }
   }
   if (!forward_to) {
@@ -2042,7 +2007,7 @@ void DarkHttpd::Connection::process_get() {
     return;
   }
 
-  StringView mimetype;
+  const char *mimetype(nullptr);
   AutoString target;
 #if DarkerSingleFile
   if (service.want_single_file) {
@@ -2074,12 +2039,12 @@ void DarkHttpd::Connection::process_get() {
     mimetype = service.url_content_type(decoded_url);
   }
 
-  debug("url=\"%s\", target=\"%s\", content-type=\"%s\"\n", url.pointer, target.pointer, mimetype.pointer);
+  debug("url=\"%s\", target=\"%s\", content-type=\"%s\"\n", url.pointer, target.pointer, mimetype);
 
   /* open file */
-  reply_fd = open(target, O_RDONLY | O_NONBLOCK);
+  reply.content_fd = open(target, O_RDONLY | O_NONBLOCK);
 
-  if (!reply_fd) {
+  if (!reply.content_fd) {
     /* open() failed */
     if (errno == EACCES) {
       default_reply(403, "Forbidden", "You don't have permission to access this URL.");
@@ -2091,12 +2056,12 @@ void DarkHttpd::Connection::process_get() {
     return;
   }
 
-  /* stat the file */
   struct stat filestat;
-  if (fstat(reply_fd, &filestat) == -1) {
+  if (fstat(reply.content_fd, &filestat) == -1) {
     default_reply(500, "Internal Server Error", "fstat() failed: %s.", strerror(errno));
     return;
   }
+  reply.file_length = filestat.st_size;
 
   /* make sure it's a regular file */
   if ((S_ISDIR(filestat.st_mode))
@@ -2111,45 +2076,38 @@ void DarkHttpd::Connection::process_get() {
     return;
   }
 
-  reply_type = REPLY_FROMFILE;
   rfc1123_date(lastmod, filestat.st_mtime);
 
   /* check for If-Modified-Since, may not have to send */
-  AutoString if_mod_since(parse_field("If-Modified-Since: "));
-
-  if ((if_mod_since) && (strcmp(if_mod_since, lastmod) == 0)) {
+  if (if_mod_since.notTrivial() && strcmp(lastmod, if_mod_since) <= 0) { //original code compared for equal, making this useless. We want file mod time any time after the given
     debug("not modified since %s\n", if_mod_since.pointer);
-    startCommonHeader(http_code = 304, "Not Modified"); //leaving off third arg leaves off ContentLength header
-
+    reply.header_only = true;
+    startCommonHeader(304, "Not Modified"); //leaving off third arg leaves off ContentLength header
     endHeader();
-
-    reply = nullptr; //free(), don't just forget and hope we remember to free it later: reply_length = 0;
-    reply_type = REPLY_GENERATED;
-    header_only = true;
     return;
   }
 
-  if (range_begin_given) { //was pointless to check range_end_given after checking begin, we never set the latter unless we have set the former
+  if (range.begin.given) { //was pointless to check range_end_given after checking begin, we never set the latter unless we have set the former
     off_t from = ~0; //init to ridiculous value ...
     off_t to = ~0; //... so that things will blow up if we don't actually set the fields
 
-    if (range_end_given) {
+    if (range.end.given) {
       /* 100-200 */
-      from = range_begin;
-      to = range_end;
+      from = range.begin;
+      to = range.end;
 
       /* clamp end to filestat.st_size-1 */
       if (to > (filestat.st_size - 1)) {
         to = filestat.st_size - 1;
       }
-    } else if (range_begin_given && !range_end_given) {
+    } else if (range.begin.given && !range.end.given) {
       /* 100- :: yields 100 to end */
-      from = range_begin;
+      from = range.begin;
       to = filestat.st_size - 1;
-    } else if (!range_begin_given && range_end_given) {
+    } else if (!range.begin.given && range.end.given) {
       /* -200 :: yields last 200 */
       to = filestat.st_size - 1;
-      from = to - range_end + 1;
+      from = to - range.end + 1;
 
       /* clamp start */
       if (from < 0) {
@@ -2168,61 +2126,21 @@ void DarkHttpd::Connection::process_get() {
       default_reply(416, "Requested Range Not Satisfiable", "You requested a backward range.");
       return;
     }
-    reply_start = from;
-    file_length = to - from + 1;
+    reply.start = from;
+    reply.file_length = to - from + 1;
 
-    startCommonHeader(206, "Partial Content", file_length);
-    header_fd.printf("Content-Range: bytes %llu-%llu/%llu\r\n", llu(from), llu(to), llu(filestat.st_size));
-
-    header_fd.printf("Content-Type: %s\r\n", mimetype.pointer);
-    header_fd.printf("Last-Modified: %s\r\n", lastmod);
-
-    endHeader();
+    startCommonHeader(206, "Partial Content", reply.file_length);
+    reply.header_fd.printf("Content-Range: bytes %llu-%llu/%llu\r\n", llu(from), llu(to), llu(filestat.st_size));
 
     debug("sending %llu-%llu/%llu\n", llu(from), llu(to), llu(filestat.st_size));
   } else {
     /* no range stuff */
-    file_length = filestat.st_size;
-    startCommonHeader(200, "OK", file_length);
-
-    header_fd.printf("Content-Type: %s\r\n", mimetype.pointer);
-    header_fd.printf("Last-Modified: %s\r\n", lastmod);
-    endHeader();
+    reply.file_length = filestat.st_size;
+    startCommonHeader(200, "OK", reply.file_length);
   }
-}
-
-/* Returns 1 if passwords are equal, runtime is proportional to the length of
- * user_input to avoid leaking the secret's length and contents through timing
- * information.
- */
-bool password_equal(const char *user_input, const char *secret) {
-  if (user_input == nullptr) {
-    return false; //
-  }
-  size_t i = 0;
-  size_t j = 0;
-  char out = 0;
-
-  while (true) {
-    /* Out stays zero if the strings are the same. */
-    out |= user_input[i] ^ secret[j];
-
-    /* Stop at end of user_input. */
-    if (user_input[i] == 0) {
-      break;
-    }
-    i++;
-
-    /* Don't go past end of secret. */
-    if (secret[j] != 0) {
-      j++;
-    }
-  }
-
-  /* Check length after loop, otherwise early exit would leak length. */
-  out |= (i != j); /* Secret was shorter. */
-  out |= (secret[j] != 0); /* Secret was longer; j is not the end. */
-  return out == 0;
+  reply.header_fd.printf("Content-Type: %s\r\n", mimetype);
+  reply.header_fd.printf("Last-Modified: %s\r\n", lastmod);
+  endHeader();
 }
 
 /* Process a request: build the header and reply, advance state. */
@@ -2231,73 +2149,72 @@ void DarkHttpd::Connection::process_request() {
 
   if (!parse_request()) {
     default_reply(400, "Bad Request", "You sent a request that the server couldn't understand.");
-  } else if (is_https_redirect()) {
+    return;
+  }
+  if (is_https_redirect) {
     redirect_https();
   }
   /* fail if: (auth_enabled) AND (client supplied invalid credentials) */
-  else if (service.auth_key != nullptr && !password_equal(authorization, service.auth_key)) { // todo:extract method
+  else if (!service.auth(authorization)) {
     default_reply(401, "Unauthorized", "Access denied due to invalid credentials.");
-  } else if (strcmp(method, "GET") == 0) {
+  } else if (method == GET) {
     process_get();
-  } else if (strcmp(method, "HEAD") == 0) {
+  } else if (method == HEAD) {
     process_get();
-    header_only = true;
+    reply.header_only = true;
   } else {
     default_reply(501, "Not Implemented", "The method you specified is not implemented.");
   }
-
   /* advance state */
   state = SEND_HEADER;
-
-  /* request not needed anymore */
-  request = nullptr;
 }
 
 /* Receiving request. */
 void DarkHttpd::Connection::poll_recv_request() {
-  char buf[1 << 15]; //32k is excessive, refuse any request that is longer than a header+maximum filename + any options allowed with a '?' for processing a file (of which the only ones of interest are directory listing options).
-
+  // char buf[1 << 15]; //32k is excessive, refuse any request that is longer than a header+maximum filename + any options allowed with a '?' for processing a file (of which the only ones of interest are directory listing options).
   assert(state == RECV_REQUEST);
-  ssize_t recvd = recv(socket, buf, sizeof(buf), 0);
+  ssize_t recvd = recv(socket, received.begin(), sizeof(theRequest) - received.length, 0);
   debug("poll_recv_request(%d) got %d bytes\n", int(socket), (int) recvd);
-  if (recvd < 1) {
-    if (recvd == -1) {
-      if (errno == EAGAIN) {
-        debug("poll_recv_request would have blocked\n");
-        return;
-      }
-      debug("recv(%d) error: %s\n", int(socket), strerror(errno));
+  if (recvd == -1) {
+    if (errno == EAGAIN) {
+      debug("poll_recv_request would have blocked\n");
+      return;
     }
+    debug("recv(%d) error: %s\n", int(socket), strerror(errno));
     conn_closed = true;
     state = DONE;
     return;
   }
+  if (recvd == 0) {
+    return; //original asserted here, but a 0 return is legal, while rare.
+  }
   last_active = service.now;
 
-  /* append to conn->request */
-  assert(recvd > 0);
-  bool ok = request.cat(buf, recvd);
-  if (!ok) {
-    debug("failed to append chunk to request being received");
-    //need to except.
-  }
-  auto newLength = request.length + recvd + 1;
-  request = static_cast<char *>(xrealloc(request, newLength));
-  memcpy(&request.pointer[request.length], buf, recvd);
-  request.length += recvd;
-  request.pointer[request.length] = 0;
-  service.fyi.total_in += recvd;
-
-  /* process request if we have all of it */
-  if (request.endsWith("\n\n", 2) || request.endsWith("\r\n\r\n", 4)) {
-    process_request();
-  }
-
-  /* die if it's too large */
-  if (request.length > MAX_REQUEST_LENGTH) {
-    default_reply(413, "Request Entity Too Large", "Your request was dropped because it was too long.");
-    state = SEND_HEADER;
-  }
+  // //from where parse ended
+  // char *lookahead = received.begin() + parsed.length;
+  //
+  // bool ok = request.cat(buf, recvd);
+  // if (!ok) {
+  //   debug("failed to append chunk to request being received");
+  //   //need to except.
+  // }
+  // auto newLength = request.length + recvd + 1;
+  // request = static_cast<char *>(xrealloc(request, newLength));
+  // memcpy(&request.pointer[request.length], buf, recvd);
+  // request.length += recvd;
+  // request.pointer[request.length] = 0;
+  // service.fyi.total_in += recvd;
+  //
+  // /* process request if we have all of it */
+  // if (request.endsWith("\n\n", 2) || request.endsWith("\r\n\r\n", 4)) {
+  //   process_request();
+  // }
+  //
+  // /* die if it's too large */
+  // if (request.length > MAX_REQUEST_LENGTH) {
+  //   default_reply(413, "Request Entity Too Large", "Your request was dropped because it was too long.");
+  //   state = SEND_HEADER;
+  // }
 
   /* if we've moved on to the next state, try to send right away, instead of
    * going through another iteration of the select() loop.
@@ -2312,9 +2229,9 @@ void DarkHttpd::Connection::poll_send_header() {
   ssize_t sent;
 
   assert(state == SEND_HEADER);
-  assert(header.length == strlen(header));
+  // assert(header.length == strlen(header));
 
-  sent = send(socket, &header[header_sent], header.length - header_sent, 0);
+  sent = send_from_file(socket, reply.header_fd, 0, reply.header_fd.getLength());
   last_active = service.now;
   debug("poll_send_header(%d) sent %d bytes\n", int(socket), (int) sent);
 
@@ -2332,13 +2249,13 @@ void DarkHttpd::Connection::poll_send_header() {
     return;
   }
   assert(sent > 0);
-  header_sent += sent;
-  total_sent += sent;
+  reply.header_sent += sent;
+  reply.total_sent += sent;
   service.fyi.total_out += sent;
 
   /* check if we're done sending header */
-  if (header_sent == header.length) {
-    if (header_only) {
+  if (reply.header_sent == reply.header_fd.length) {
+    if (reply.header_only) {
       state = DONE;
     } else {
       state = SEND_REPLY;
@@ -2420,26 +2337,23 @@ void DarkHttpd::Connection::poll_send_reply() {
   ssize_t sent;
 
   assert(state == SEND_REPLY);
-  assert(!header_only);
-  if (reply_type == REPLY_GENERATED) {
-    assert(reply.length >= reply_sent);
-    sent = send(socket, &reply[reply_start + reply_sent], reply.length - reply_sent, 0);
-  } else {
-    /* off_t of file_length can be wider than size_t, avoid overflow in send_len */
-    const size_t max_size_t = ~0;
-    off_t send_len = file_length - reply_sent;
-    if (send_len > max_size_t) {
-      send_len = max_size_t;
-    }
-    errno = 0;
-    assert(reply.length >= reply_sent);
-    sent = send_from_file(socket, reply_fd, reply_start + reply_sent, send_len);
-    if (sent < 1) {
-      debug("send_from_file returned %lld (errno=%d %s)\n", llu(sent), errno, strerror(errno));
-    }
+  assert(!reply.header_only);
+
+  /* off_t of file_length can be wider than size_t, avoid overflow in send_len */
+  const size_t max_size_t = ~0;
+  off_t send_len = reply.file_length - reply.sent;
+  if (send_len > max_size_t) {
+    send_len = max_size_t;
   }
+  errno = 0;
+  assert(reply.file_length >= reply.sent);
+  sent = send_from_file(socket, reply.content_fd, reply.start + reply.sent, send_len);
+  if (sent < 1) {
+    debug("send_from_file returned %lld (errno=%d %s)\n", llu(sent), errno, strerror(errno));
+  }
+
   last_active = service.now;
-  debug("poll_send_reply(%d) sent %ld: %llu+[%llu-%llu] of %llu\n", int(socket), sent, llu(reply_start), llu(reply_sent), llu(reply_sent + sent - 1), llu(file_length));
+  debug("poll_send_reply(%d) sent %ld: %llu+[%llu-%llu] of %llu\n", int(socket), sent, llu(reply.start), llu(reply.sent), llu(reply.sent + sent - 1), llu(reply.file_length));
 
   /* handle any errors (-1) or closure (0) in send() */
   if (sent < 1) {
@@ -2456,12 +2370,12 @@ void DarkHttpd::Connection::poll_send_reply() {
     state = DONE;
     return;
   }
-  reply_sent += sent;
-  total_sent += sent;
+  reply.sent += sent;
+  reply.total_sent += sent;
   service.fyi.total_out += sent;
 
   /* check if we're done sending */
-  if (reply_sent == file_length) {
+  if (reply.sent == reply.file_length) {
     state = DONE;
   }
 }
@@ -2868,7 +2782,7 @@ void DarkHttpd::PipePair::close() {
 }
 
 void DarkHttpd::PidFiler::remove() {
-  if (unlink(file_name) == -1) {
+  if (::unlink(file_name) == -1) {
     err(1, "unlink(pidfile) failed");
   }
   /* if (flock(pidfile_fd, LOCK_UN) == -1)
@@ -2934,10 +2848,41 @@ void DarkHttpd::PidFiler::create() {
   }
 }
 
-#if 0
-these three actions were once associated with closing a connection, but apply only to the server. That seems like a bug, limiting the server to single connections despite all the work to have multiple ones.
-log_connection(this);
-xclose(reply_fd);
-/* If we ran out of sockets, try to resume accepting. */
-accepting = true;
-#endif
+
+/* Returns 1 if passwords are equal, runtime is proportional to the length of
+ * user_input to avoid leaking the secret's length and contents through timing
+ * information.
+ */
+bool DarkHttpd::Authorizer::operator()(const char *user_input) {
+  if (!key) {
+    return true;
+  }
+  const char *secret = key.pointer;
+  if (user_input == nullptr) {
+    return false; //
+  }
+  size_t i = 0;
+  size_t j = 0;
+  char out = 0;
+
+  while (true) {
+    /* Out stays zero if the strings are the same. */
+    out |= user_input[i] ^ secret[j];
+
+    /* Stop at end of user_input. */
+    if (user_input[i] == 0) {
+      break;
+    }
+    i++;
+
+    /* Don't go past end of secret. */
+    if (secret[j] != 0) {
+      j++;
+    }
+  }
+
+  /* Check length after loop, otherwise early exit would leak length. */
+  out |= (i != j); /* Secret was shorter. */
+  out |= (secret[j] != 0); /* Secret was longer; j is not the end. */
+  return out == 0;
+}
