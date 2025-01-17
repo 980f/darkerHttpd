@@ -24,7 +24,7 @@
  * PERFORMANCE OF THIS SOFTWARE.
  *
  * It has been heavily modified to make it a module that can be included in other programs.
- * Added compile time defines: DarkerSingleFile define to non-zero value to include feature. Use a directory with just the one file in it, via a file link, rather than having lots of code in this program for such a rare occurrence. A file glob filter would be a better feature.
+ * removed "single file" concept, use a directory with just the one file in it, via a file link, rather than having lots of code in this program for such a rare occurrence. A file glob filter would be a better feature.
  */
 
 #pragma once
@@ -710,10 +710,6 @@ private:
   bool want_accf = false;
   bool want_keepalive = true;
   bool want_server_id = true;
-
-#if DarkerSingleFile
-  bool want_single_file = false;
-#endif
 
   struct Authorizer {
     AutoString key; /* NULL or "Basic base64_of_password" */ //base64 expansion of a cli arg.

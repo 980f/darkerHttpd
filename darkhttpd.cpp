@@ -942,11 +942,6 @@ void DarkHttpd::usage(const char *argv0) {
 #endif
   printf("\t--no-keepalive\n"
     "\t\tDisables HTTP Keep-Alive functionality.\n\n");
-#if DarkerSingleFile
-  printf("\t--single-file\n"
-    "\t\tOnly serve a single file provided as /path/to/file instead\n"
-    "\t\tof a whole directory.\n\n");
-#endif
   printf("\t--forward host url (default: don't forward)\n"
     "\t\tWeb forward (301 redirect).\n"
     "\t\tRequests to the host are redirected to the corresponding url.\n"
@@ -1172,10 +1167,6 @@ bool DarkHttpd::parse_commandline(int argc, char *argv[]) {
       want_accf = true;
     } else if (strcmp(argv[i], "--syslog") == 0) {
       syslog_enabled = true;
-#if DarkerSingleFile
-    } else if (strcmp(argv[i], "--single-file") == 0) {
-      want_single_file = true;
-#endif
     } else if (strcmp(argv[i], "--forward") == 0) {
       if (++i >= argc) {
         errx(1, "missing host after --forward");
@@ -2140,12 +2131,6 @@ void DarkHttpd::Connection::process_get() {
 
   const char *mimetype(nullptr);
   AutoString target;
-#if DarkerSingleFile
-  if (service.want_single_file) {
-    target = service.wwwroot.clone();
-    mimetype = service.url_content_type(target);
-  } else
-#endif
 
   if (decoded_url.endsWith('/')) {
     /* does it end in a slash? serve up url/index_name */
@@ -2195,11 +2180,7 @@ void DarkHttpd::Connection::process_get() {
   reply.file_length = filestat.st_size;
 
   /* make sure it's a regular file */
-  if ((S_ISDIR(filestat.st_mode))
-#if DarkerSingleFile
-  && (!service.want_single_file)
-#endif
-  ) {
+  if ((S_ISDIR(filestat.st_mode))) {
     redirect("%s/", url.pointer);
     return;
   } else if (!S_ISREG(filestat.st_mode)) {
@@ -2738,30 +2719,6 @@ void DarkHttpd::change_root() {
 #endif
 
   tzset(); /* read /etc/localtime before we chroot */
-#if DarkerSingleFile
-
-  if (want_single_file) {
-    AutoString path = wwwroot.clone();
-    auto lastSlash = strrchr(path, '/');
-    /* wwwroot file is not presumed to be in the current directory */
-    if (lastSlash) {
-      lastSlash[0] = '\0'; // truncate path, wwwroot still as given
-      if (chdir(path) == -1) {
-        err(1, "chdir(%s)", path.pointer);
-      }
-      wwwroot = &lastSlash[1];
-    } else { //should be same as cwd
-      path[0] = '.'; //?! this trusts that wwwroot has at least one char before its null.
-      path[1] = '\0';
-    }
-    if (chroot(path) == -1) {
-      err(1, "chroot(%s)", path.pointer);
-    }
-    printf("chrooted to `%s'\n", path.pointer);
-    return;
-  }
-
-#endif
 
   if (chdir(wwwroot.begin()) == -1) {
     err(1, "chdir(%s)", wwwroot.begin());
