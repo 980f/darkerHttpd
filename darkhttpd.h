@@ -68,29 +68,18 @@
 #endif
 #endif
 
-/** a not-null terminated string that can be shrunk but not expanded. This class exists so that we can sub-string without touching the original string OR copying it.*/
-
+/** a not-null terminated string that can be shrunk but not expanded.
+ * This class exists so that we can sub-string without touching the original string OR copying it.*/
 struct StringView {
   char *pointer = nullptr;
   size_t length = 0;
   size_t start = 0;
 
-  StringView(char *pointer, size_t length = ~0, size_t start = 0): pointer{pointer},
-    length{length},
-    start{start} {
-    if (pointer && length == ~0) {
-      this->length = strlen(&pointer[start]);
-    }
-  }
+  StringView(char *pointer, size_t length = ~0, size_t start = 0);
 
   StringView(char *begin, char *pastEnd): pointer{begin}, length(pastEnd > begin ? pastEnd - begin : 0) {}
 
-  StringView &operator=(char *str) {
-    pointer = str;
-    length = strlen(str);
-    start = 0;
-    return *this;
-  }
+  StringView &operator=(char *str);
 
   char *begin() const {
     return &pointer[start];
@@ -101,8 +90,9 @@ struct StringView {
     return &pointer[length - offset];
   }
 
-  bool operator==(const char *) const {
-    return strncasecmp(begin(), "GET", length) == 0;
+  /** case insensitive compare */
+  bool operator==(const char *toMatch) const {
+    return strncasecmp(begin(), toMatch, length) == 0;
   }
 
   operator char *() const {
@@ -122,81 +112,23 @@ struct StringView {
     return pointer == nullptr || length == 0;
   }
 
-  StringView subString(size_t start, size_t pastEnd) const {
-    //todo: argument checks, both must be less than length and their sum must be less than length.
-    if (start + pastEnd > length) {
-      return StringView(pointer + this->start + start, pastEnd - start);
-    }
-    return StringView(nullptr, 0, 0);
-  }
+  StringView subString(size_t start, size_t pastEnd) const;
 
   /** @returns pointer to byte after where this StringView's content was inserted. If this guy is trivial then this will be the same as @param bigenough which is where the contents of this object are copied into.
    * @param honorNull is whether to stop inserting this guy if a null is found short of the length.
    */
   // char *put(char *bigenough, bool honorNull = true) const;
-  char *put(char *bigenough, bool honorNull) const {
-    if (bigenough) {
-      if (pointer) {
-        if (length) {
-          for (size_t count = 0; count < length; ++count) {
-            *bigenough++ = pointer[count];
-            if (honorNull && !pointer[count]) {
-              break;
-            }
-          }
-        }
-      }
-      //this needs to be conditional for when we insert this guy into a right-sized hole inside *bigenough=0;
-    }
-    return bigenough;
-  }
+  char *put(char *bigenough, bool honorNull) const;
 
   /* @returns index of first instance of @param sought found looking backwards from @param searchpoint not including searchpoint itself, -1 if char not found. */
-  ssize_t lookBack(ssize_t searchpoint, char sought) const {
-    if (searchpoint > length) {
-      return -1; //Garbage in: act dumb.
-    }
-    while (--searchpoint >= 0) {
-      if (pointer[start + searchpoint] == sought) {
-        break;
-      }
-    }
-    return searchpoint;
-  }
+  ssize_t lookBack(ssize_t searchpoint, char sought) const;
 
-  ssize_t lookAhead(char sought) {
-    size_t looker = 0;
-    do {
-      if (pointer[start + looker] == sought) {
-        return looker;
-      }
-    } while (++looker < length) ;
-    return -1;
-  }
+  ssize_t lookAhead(char sought) const;
 
-  void chop(size_t moveStart) {
-    if (moveStart > length) {
-      start = length;
-      length = 0;
-      return;
-    }
-    start += moveStart;
-    length -= moveStart;
-  }
+  /** move the start by @param moveStart, equivalent to removing the front of the string. */
+  void chop(size_t moveStart);
 
-  StringView cutToken(char termchar) {
-    if (notTrivial()) {
-      auto cutpoint = lookAhead(termchar);
-      if (cutpoint == -1) {
-        //todo: what do we do?
-      } else {
-        StringView token = StringView(pointer + start, length - cutpoint - 1); //limit new view as much as possible, no looking back in front of it.
-        chop(token.length);
-        return token;
-      }
-    }
-    return StringView(nullptr);
-  }
+  StringView cutToken(char termchar);
 
   /** calls @see put then adds a terminator and returns a pointer to that terminator. */
   char *cat(char *bigenough, bool honorNull) const {
@@ -211,19 +143,14 @@ struct StringView {
     return fwrite(pointer, length, 1, out); //#fputs requires a null terminator, this class exists to support not-null-terminated char arrays.
   }
 
-  void trimTrailing(const char *trailers) {
-    if (pointer == nullptr) {
-      return;
-    }
-    while (length && strchr(trailers, pointer[start + length - 1])) {
-      --length;
-    }
-  }
+  void trimTrailing(const char *trailers);
+
+  void trimLeading(const char *trailers);
 
   char &operator[](size_t offset) {
-    static char buggem;
+    // static char buggem;
     if (start + offset >= length) {
-      return *begin();//bad offset will point to first char which should surprise the programmer. The author of this code never makes this kind of error, he adds methods to this class for anything complex.
+      return *begin(); //bad offset will point to first char which should surprise the programmer. The author of this code never makes this kind of error, he adds methods to this class for anything complex.
     }
     return pointer[start + offset];
   }
@@ -240,33 +167,9 @@ struct StringView {
     return pointer && length > 0 && slash == pointer[length - 1];
   }
 
-  ssize_t findLast(const StringView &extension) {
-    if (notTrivial()&extension.notTrivial()) {//without checking extension length we could seek starting one byte past our allocation, probably harmless but easier to preclude than to verify.
-      if (extension.length < length) {
-        auto given = pointer + length - extension.length;
+  ssize_t findLast(const StringView &extension) const;
 
-        given = strrchr(given, ' '); //todo: allow tabs
-        if (given) {
-          if (strncmp(extension.begin(), given, extension.length) == 0) {
-            return given - begin();
-          }
-        }
-      }
-    }
-    return -1;
-  }
-
-  long long int cutNumber() {
-    char *start=begin();
-    char *end;
-    auto number=strtoll(start, &end, 10);
-    if (end == start) {
-      //nothing was there, no number was parsed
-      return 0;
-    }
-    chop(end - start);
-    return number;
-  }
+  long long int cutNumber();
 };
 
 /** to help ensure timely frees.
@@ -397,8 +300,10 @@ public:
   protected:
     int fd = -1;
     FILE *stream = nullptr;
-  public://temporary during code construction, this is carelessly cached.
+
+  public: //temporary during code construction, this is carelessly cached.
     size_t length = 0;
+
   public:
     FILE *getStream() { //this "create at need"
       if (fd == -1) {
@@ -480,7 +385,7 @@ public:
       if (seemsOk()) {
         struct stat filestat;
         if (fstat(fd, &filestat) == 0) {
-          return length= filestat.st_size;
+          return length = filestat.st_size;
         }
       }
       return -1;
@@ -544,7 +449,7 @@ public:
     //should structure this group, values come from parse_field
     struct ByteRange {
       struct Bound {
-        off_t number;//using signed for parsing convenience.
+        off_t number; //using signed for parsing convenience.
         operator off_t() const {
           return number;
         }
@@ -553,22 +458,27 @@ public:
           number = parsed;
           return number;
         }
+
         bool given;
+
         void recycle() {
-          number=0;
-          given=false;
+          number = 0;
+          given = false;
         }
       };
+
       Bound begin;
       Bound end;
+
       int parse(StringView headerline);
+
       void recycle() {
         begin.recycle();
         end.recycle();
       }
     } range;
 
-    bool conn_closed = true;//move this back to connection itself.
+    bool conn_closed = true; //move this back to connection itself.
 
     struct Replier {
       bool header_only = false;
@@ -770,7 +680,7 @@ private:
 #ifdef HAVE_INET6
   bool inet6 = false; /* whether the socket uses inet6 */
 #endif
-  const char *default_mimetype=nullptr;
+  const char *default_mimetype = nullptr;
   /** file of mime mappings gets read into here.*/
   AutoString mimeFileContent;
 
@@ -805,11 +715,10 @@ private:
   bool want_single_file = false;
 #endif
 
- struct Authorizer {
-
-   AutoString key; /* NULL or "Basic base64_of_password" */ //base64 expansion of a cli arg.
-   bool operator()(const char *authorization);
- } auth;
+  struct Authorizer {
+    AutoString key; /* NULL or "Basic base64_of_password" */ //base64 expansion of a cli arg.
+    bool operator()(const char *authorization);
+  } auth;
 
   //todo: load only from file, not commandline. Might even drop feature. Alternative is a std::vector of headers rather than a blob.
   std::vector<const char *> custom_hdrs; //parse_commandline concatenation of argv's with formatting. Should just record their indexes and generate on sending rather than cacheing here.
