@@ -1166,12 +1166,12 @@ bool DarkHttpd::parse_commandline(int argc, char *argv[]) {
         errx(1, "missing url after --forward");
       }
       const char *url = argv[i];
-      forward_map.add(host, url);
+      forward.map.add(host, url);
     } else if (strcmp(argv[i], "--forward-all") == 0) {
       if (++i >= argc) {
         errx(1, "missing url after --forward-all");
       }
-      forward_all_url = argv[i];
+      forward.all_url = argv[i];
     } else if (strcmp(argv[i], "--no-server-id") == 0) {
       want_server_id = false;
     } else if (strcmp(argv[i], "--timeout") == 0) {
@@ -1187,7 +1187,7 @@ bool DarkHttpd::parse_commandline(int argc, char *argv[]) {
       AutoString key = reinterpret_cast<char *>(base64_encode(argv[i]));
       xasprintf(auth.key, "Basic %s", key.pointer);
     } else if (strcmp(argv[i], "--forward-https") == 0) {
-      forward_to_https = true;
+      forward.to_https = true;
     } else if (strcmp(argv[i], "--header") == 0) {
       if (++i >= argc) {
         errx(1, "missing argument after --header");
@@ -1255,7 +1255,7 @@ void DarkHttpd::accept_connection() {
   {
     *reinterpret_cast<in_addr_t *>(&conn->client) = addrin.sin_addr.s_addr;
   }
-  entries.push_front(conn);
+  connections.push_front(conn);
 
   debug("accepted connection from %s:%u (fd %d)\n", inet_ntoa(addrin.sin_addr), ntohs(addrin.sin_port), int(conn->socket));
 
@@ -1979,18 +1979,7 @@ void DarkHttpd::Connection::process_get() {
     default_reply(400, "Bad Request", "You requested an invalid URL.");
     return;
   }
-
-  const char *forward_to = nullptr;
-  /* test the host against web forward options */
-  if (service.forward_map.size() > 0) {
-    if (hostname.notTrivial()) {
-      debug("host=\"%s\"\n", hostname.pointer);
-      forward_to = service.forward_map.at(hostname);
-    }
-  }
-  if (!forward_to) {
-    forward_to = service.forward_all_url;
-  }
+  auto forward_to=service.forward(hostname);
   if (forward_to) {
     redirect("%s%s", forward_to, decoded_url.pointer);
     return;
@@ -2391,7 +2380,7 @@ void DarkHttpd::httpd_poll() {
     MAX_FD_SET(int(sockin), &recv_set);
   }
 
-  for (auto conn: entries) {
+  for (auto conn: connections) {
     switch (conn->state) {
       case Connection::DONE:
         /* do nothing, no connection should be left in this state */
@@ -2460,7 +2449,7 @@ void DarkHttpd::httpd_poll() {
     accept_connection();
   }
 
-  for (auto conn: entries) {
+  for (auto conn: connections) {
     conn->poll_check_timeout();
     int socket = conn->socket;
     switch (conn->state) {
@@ -2491,7 +2480,7 @@ void DarkHttpd::httpd_poll() {
     if (conn->state == Connection::DONE) {
       /* clean out finished connection */
       if (conn->conn_closed) {
-        entries.remove(conn);
+        connections.remove(conn);
         conn->clear();
       } else {
         conn->recycle();
@@ -2681,12 +2670,12 @@ void DarkHttpd::prepareToRun() {
 
 void DarkHttpd::freeall() {
   /* close and free connections */
-  for (auto conn: entries) {
-    entries.remove(conn);
+  for (auto conn: connections) {
+    connections.remove(conn);
     conn->clear();
   }
 
-  forward_map.clear(); // todo; free contents first! Must establish that all were malloc'd
+  forward.map.clear(); // todo; free contents first! Must establish that all were malloc'd
 }
 
 /* Execution starts here. */

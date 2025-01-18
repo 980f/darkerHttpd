@@ -278,23 +278,6 @@ class DarkHttpd {
   /** until we use the full signal set ability to pass our object we only allow one DarkHttpd per process.*/
   static DarkHttpd *forSignals; // trusting BSS zero to clear this.
 
-  /** todo: replace with listmaker base class as linear search is more than fast enough. In fact, just do a string search after replacing cli args with file read.*/
-  struct forward_mapping : std::map<const char *, const char *> {
-    // const char *host, *target_url; /* These point at argv. */
-    void add(const char *const host, const char *const target_url) {
-      insert_or_assign(host, target_url); // # allows breakpoint on these. We need to decide whether multiples are allowed for the same host, at present that has been excluded but the orignal might have allowed for that in which case we need a map of list of string.
-    }
-
-    /** free contents, then forget them.*/
-    void purge() {
-      for (auto each: *this) {
-        free(const_cast<char *>(each.first));
-        free(const_cast<char *>(each.second));
-      }
-      clear();
-    }
-  } forward_map;
-
 public:
   class Fd { // a minimal one compared to safely/posix
   protected:
@@ -569,6 +552,10 @@ public:
     void generate_dir_listing(const char *path, const char *decoded_url);
   }; //end of connection child class
 
+  /** the entries will all be dynamically allocated */
+  std::forward_list<Connection *> connections;
+
+
   void load_mime_map_file(const char *filename);
 
   const char *url_content_type(const char *url);
@@ -669,12 +656,42 @@ private:
 
   Fd sockin; /* socket to accept connections from */
 
-  /** the entries will all be dynamically allocated */
-  std::forward_list<Connection *> entries;
+  struct Forwarding {
+    const char *all_url = nullptr;
 
-  const char *forward_all_url = nullptr;
+    bool to_https = false;
 
-  bool forward_to_https = false;
+    /** todo: replace with listmaker base class as linear search is more than fast enough. In fact, just do a string search after replacing cli args with file read.*/
+    struct forward_mapping : std::map<const char *, const char *> {
+      // const char *host, *target_url; /* These point at argv. */
+      void add(const char *const host, const char *const target_url) {
+        insert_or_assign(host, target_url); // # allows breakpoint on these. We need to decide whether multiples are allowed for the same host, at present that has been excluded but the orignal might have allowed for that in which case we need a map of list of string.
+      }
+
+      /** free contents, then forget them.*/
+      void purge() {
+        for (auto each: *this) {
+          free(const_cast<char *>(each.first));
+          free(const_cast<char *>(each.second));
+        }
+        clear();
+      }
+    } map;
+
+    const char *operator()(StringView hostname) {
+      /* test the host against web forward options */
+      if (map.size() > 0) {
+        if (hostname.notTrivial()) {
+          // debug("host=\"%s\"\n", hostname.pointer);
+          auto forward_to = map.find(hostname);
+          if (forward_to != map.end()) {
+            return forward_to->second;
+          }
+        }
+      }
+      return all_url;
+    }
+  } forward;
 
   /* If a connection is idle for timeout_secs or more, it gets closed and
    * removed from the connlist.
