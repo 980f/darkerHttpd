@@ -1150,7 +1150,7 @@ bool DarkHttpd::parse_commandline(int argc, char *argv[]) {
       if (++i >= argc) {
         errx(1, "missing filename after --pidfile");
       }
-      pid.file_name = argv[i];
+      d.pid.file_name = argv[i];
     } else if (strcmp(argv[i], "--no-keepalive") == 0) {
       want_keepalive = false;
     } else if (strcmp(argv[i], "--accf") == 0) {
@@ -2503,7 +2503,7 @@ void DarkHttpd::httpd_poll() {
 /* Daemonize helpers. */
 #define PATH_DEVNULL "/dev/null"
 
-bool DarkHttpd::daemonize_start() {
+bool DarkHttpd::Daemon::start() {
   if (!lifeline.connect()) {
     err(1, "pipe(lifeline)");
     return false;
@@ -2547,7 +2547,7 @@ bool DarkHttpd::daemonize_start() {
   return true;
 }
 
-void DarkHttpd::daemonize_finish() {
+void DarkHttpd::Daemon::finish() {
   if (!fd_null) {
     return; /* didn't daemonize_start() so we're not daemonizing */
   }
@@ -2635,7 +2635,7 @@ void DarkHttpd::prepareToRun() {
   }
 
   if (want_daemon) {
-    daemonize_start();
+    d.start();
   }
 
   /* signals */
@@ -2672,10 +2672,10 @@ void DarkHttpd::prepareToRun() {
     printf("set uid to %d\n", (int) drop_uid);
   }
 
-  pid.create();
+  d.pid.create();//creating even if it isn't actually going to be used as a soliton enforcer for the daemon state.
 
   if (want_daemon) {
-    daemonize_finish();
+    d.finish();
   }
 }
 
@@ -2706,8 +2706,8 @@ int DarkHttpd::main(int argc, char **argv) {
     }
     /* clean exit */
     xclose(sockin);
-    if (pid.file_name) {
-      pid.remove(); //systemd can be configured to do this for you.
+    if (d.pid.file_name) {
+      d.pid.remove(); //systemd can be configured to do this for you.
     }
   } catch (DarkException ex) {
     printf("Exit %d attempted, ending polling loop in __FUNCTION__", ex.returncode);
@@ -2724,7 +2724,7 @@ int DarkHttpd::main(int argc, char **argv) {
   return exitcode;
 }
 
-void DarkHttpd::PipePair::close() {
+void DarkHttpd::Daemon::PipePair::close() {
   if (!fds[0].close()) {
     warn("close read end of lifeline in child");
   }
@@ -2733,7 +2733,7 @@ void DarkHttpd::PipePair::close() {
   }
 }
 
-void DarkHttpd::PidFiler::remove() {
+void DarkHttpd::Daemon::PidFiler::remove() {
   if (::unlink(file_name) == -1) {
     err(1, "unlink(pidfile) failed");
   }
@@ -2742,14 +2742,14 @@ void DarkHttpd::PidFiler::remove() {
   close();
 }
 
-void DarkHttpd::PidFiler::Remove(const char *why) {
+void DarkHttpd::Daemon::PidFiler::Remove(const char *why) {
   int error = errno;
   remove();
   errno = error;
   err(1, why); //ignore format-security warning, it can't work here.
 }
 
-int DarkHttpd::PidFiler::file_read() {
+int DarkHttpd::Daemon::PidFiler::file_read() {
   char buf[16];
   long long pid;
 
@@ -2773,7 +2773,7 @@ int DarkHttpd::PidFiler::file_read() {
 
 #define PIDFILE_MODE 0600
 
-void DarkHttpd::PidFiler::create() {
+void DarkHttpd::Daemon::PidFiler::create() {
   if (!file_name) {
     return;
   }

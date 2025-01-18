@@ -476,6 +476,7 @@ public:
         begin.recycle();
         end.recycle();
       }
+
       ByteRange() {
         recycle();
       }
@@ -580,9 +581,6 @@ public:
 
   void httpd_poll();
 
-  bool daemonize_start();
-
-  void daemonize_finish();
 
   void freeall();
 
@@ -598,7 +596,7 @@ public:
 
 #define DATE_LEN 30 /* strlen("Fri, 28 Feb 2003 00:02:08 GMT")+1 */
 
-  const char *generated_on(const char date[DATE_LEN]) const;
+  // const char *generated_on(const char date[DATE_LEN]) const;
 
 public:
   DarkHttpd(): mimeFileContent(nullptr), wwwroot{nullptr} {
@@ -632,23 +630,42 @@ public:
   } now;
 
 private:
-  Fd fd_null;
+  struct Daemon {
+    struct PipePair {
+      Fd fds[2];
 
-  struct PipePair {
-    Fd fds[2];
+      int operator[](bool which) const {
+        return fds[which];
+      }
 
-    int operator[](bool which) const {
-      return fds[which];
-    }
+      bool connect() const {
+        int punned[2] = {fds[0], fds[1]};
+        return pipe(punned) != -1;
+      }
 
-    bool connect() const {
-      int punned[2] = {fds[0], fds[1]};
-      return pipe(punned) != -1;
-    }
+      void close();
+    } lifeline;
 
-    void close();
-  } lifeline;
+    Fd fd_null;
+    /* [->] pidfile helpers, based on FreeBSD src/lib/libutil/pidfile.c,v 1.3
+     * Original was copyright (c) 2005 Pawel Jakub Dawidek <pjd@FreeBSD.org>
+     */
+    struct PidFiler : Fd {
+      char *file_name = nullptr; /* NULL = no pidfile */
 
+      void remove();
+
+      void Remove(const char *why);
+
+      int file_read();
+
+      void create();
+    } pid;
+
+    bool start();
+
+    void finish();
+  } d;
 
   Fd sockin; /* socket to accept connections from */
 
@@ -693,27 +710,15 @@ private:
   char *logfile_name = nullptr; /* NULL = no logging */
   FILE *logfile = nullptr;
 
-  /* [->] pidfile helpers, based on FreeBSD src/lib/libutil/pidfile.c,v 1.3
-   * Original was copyright (c) 2005 Pawel Jakub Dawidek <pjd@FreeBSD.org>
-   */
-  struct PidFiler : Fd {
-    char *file_name = nullptr; /* NULL = no pidfile */
-
-    void remove();
-
-    void Remove(const char *why);
-
-    int file_read();
-
-    void create();
-  } pid;
 
   bool want_chroot = false;
   bool want_daemon = false;
   bool want_accf = false;
   bool want_keepalive = true;
-  public://bridge for directory lister.
+
+public: //bridge for directory lister.
   bool want_server_id = true;
+
 private:
   struct Authorizer {
     AutoString key; /* NULL or "Basic base64_of_password" */ //base64 expansion of a cli arg.
