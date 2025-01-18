@@ -224,28 +224,6 @@ static void warn(const char *format, ...) {
   va_end(va);
 }
 
-/** @returns nullptr if the line is blank or EOL or EOL comment char, else points to first char not a space nor a tab */
-static const char *removeLeadingWhitespace(const char *text) {
-  auto first = strspn(text, " \t\n\r");
-
-  while (auto c = text[first]) {
-    switch (c) {
-      case ' ':
-      case '\t':
-        continue;
-      case 0: //text is all blanks or tabs, index is of the null terminator
-      case '#': //EOL comment marker
-      case '\r': //in case we pull these out of
-      case '\n': // ... the whitespace string
-        return nullptr;
-      default:
-        return &text[first];
-    }
-  }
-  return nullptr;
-}
-
-
 /* close() that dies on error.  */
 static void xclose(DarkHttpd::Fd fd) {
   if (!fd.close()) {
@@ -340,18 +318,6 @@ static void nonblock_socket(const int sock) {
   }
 }
 
-/* strdup a sub string [begin:end), adding a null. */
-static char *sub_string(const char *begin, const char *end) {
-  if (end) {
-    auto length = end - begin;
-    char *dest = new char [length + 1]; //+1 for null
-    memcpy(dest, begin, length);
-    dest[length] = '\0';
-    return dest;
-  }
-  return strdup(begin);
-}
-
 /* Resolve /./ and /../ in a URL, in-place.
  * Returns NULL if the URL is invalid/unsafe, or the original buffer if
  * successful.
@@ -386,8 +352,9 @@ static char *make_safe_url(char *const url) {
   while (*src) {
     if (*src != '/') {
       *dst++ = *src++;
-    } else if (*++src == '/');
-    else if (*src != '.') {
+    } else if (*++src == '/') {
+      //drop second of doubled slash.
+    } else if (*src != '.') {
       *dst++ = '/';
     } else if (ends(src[1])) {
       /* Ignore single-dot component. */
@@ -422,7 +389,7 @@ StringView::StringView(char *pointer, size_t length, size_t start): pointer{poin
   }
 }
 
-StringView & StringView::operator=(char *str) {
+StringView &StringView::operator=(char *str) {
   pointer = str;
   length = strlen(str);
   start = 0;
@@ -437,7 +404,7 @@ StringView StringView::subString(size_t start, size_t pastEnd) const {
   return StringView(nullptr, 0, 0);
 }
 
-char * StringView::put(char *bigenough, bool honorNull) const {
+char *StringView::put(char *bigenough, bool honorNull) const {
   if (bigenough) {
     if (pointer) {
       if (length) {
@@ -517,6 +484,29 @@ void StringView::trimLeading(const char *trailers) {
   }
 }
 
+// keep for a little while, it was needed at one time
+// /** @returns nullptr if the line is blank or EOL or EOL comment char, else points to first char not a space nor a tab */
+// static const char *removeLeadingWhitespace(const char *text) {
+//   auto first = strspn(text, " \t\n\r");
+//
+//   while (auto c = text[first]) {
+//     switch (c) {
+//       case ' ':
+//       case '\t':
+//         continue;
+//       case 0: //text is all blanks or tabs, index is of the null terminator
+//       case '#': //EOL comment marker
+//       case '\r': //in case we pull these out of
+//       case '\n': // ... the whitespace string
+//         return nullptr;
+//       default:
+//         return &text[first];
+//     }
+//   }
+//   return nullptr;
+// }
+
+
 bool StringView::endsWith(const char *str, unsigned len) const {
   if (len == ~0) {
     len = strlen(str);
@@ -525,7 +515,7 @@ bool StringView::endsWith(const char *str, unsigned len) const {
 }
 
 ssize_t StringView::findLast(const StringView &extension) const {
-  if (notTrivial()&extension.notTrivial()) {//without checking extension length we could seek starting one byte past our allocation, probably harmless but easier to preclude than to verify.
+  if (notTrivial() & extension.notTrivial()) { //without checking extension length we could seek starting one byte past our allocation, probably harmless but easier to preclude than to verify.
     if (extension.length < length) {
       auto given = pointer + length - extension.length;
 
@@ -541,9 +531,9 @@ ssize_t StringView::findLast(const StringView &extension) const {
 }
 
 long long int StringView::cutNumber() {
-  char *start=begin();
+  char *start = begin();
   char *end;
-  auto number=strtoll(start, &end, 10);
+  auto number = strtoll(start, &end, 10);
   if (end == start) {
     //nothing was there, no number was parsed
     return 0;
@@ -1428,7 +1418,7 @@ void DarkHttpd::Connection::Replier::recycle() {
   total_sent = 0;
 }
 
-DarkHttpd::Connection::Connection(DarkHttpd &parent, int fd): socket(fd), service(parent), hostname{nullptr}, url{nullptr}, referer{nullptr}, user_agent{nullptr}, authorization{nullptr}, if_mod_since{nullptr} {
+DarkHttpd::Connection::Connection(DarkHttpd &parent, int fd): socket(fd), service(parent), theRequest{}, method{}, hostname{nullptr}, url{nullptr}, referer{nullptr}, user_agent{nullptr}, authorization{nullptr}, if_mod_since{nullptr}, is_https_redirect{false} {
   memset(&client, 0, sizeof(client));
   nonblock_socket(socket);
   state = RECV_REQUEST;
@@ -1517,20 +1507,6 @@ static char *urldecode(const char *url) {
   *writer = 0;
   return out;
 }
-
-/* "Generated by " + pkgname + " on " + date + "\n"
- *  1234567890123               1234            2 ('\n' and '\0')
- */
-static char _generated_on_buf[13 + sizeof(pkgname) - 1 + 4 + DATE_LEN + 2];
-
-const char *DarkHttpd::generated_on(const char date[DATE_LEN]) const {
-  if (!want_server_id) {
-    return "";
-  }
-  snprintf(_generated_on_buf, sizeof(_generated_on_buf), "Generated by %s on %s\n", pkgname, date);
-  return _generated_on_buf;
-}
-
 
 void DarkHttpd::Connection::startHeader(const int errcode, const char *errtext) {
   if (errcode > 0) {
@@ -1669,28 +1645,6 @@ void DarkHttpd::Connection::redirect(const char *format, ...) {
   endHeader();
 }
 
-// /* Parses a single HTTP request field.  Returns string from end of [field] to
-//  * first \r, \n or end of request string.  Returns NULL if [field] can't be
-//  * matched.  Case insensitive.
-//  *
-//  * You need to remember to deallocate the result.
-//  * example: parse_field(conn, "Referer: ");
-//  */
-// char *DarkHttpd::Connection::parse_field(const char *field) const {
-//   /* find start */
-//   char *pos = strcasestr(request, field);
-//   if (pos == nullptr) {
-//     return nullptr;
-//   }
-//   pos += strlen(field); //char just past end of 'field'
-//   /* find end of line */
-//   auto eol = strpbrk(pos, "\r\n");
-//   if (!eol) { //already null terminated, just dup it
-//     return strdup(pos);
-//   }
-//   return sub_string(pos, eol);
-// }
-
 void DarkHttpd::Connection::redirect_https() {
   /* work out path of file being requested */
   AutoString url(urldecode(url));
@@ -1711,8 +1665,7 @@ void DarkHttpd::Connection::redirect_https() {
 
 
 /* Parse an HTTP request like "GET /urlGoes/here HTTP/1.1" to get the method (GET), the
- * url (/), the referer (if given) and the user-agent (if given).  Remember to
- * deallocate all these buffers.  The method will be returned in uppercase.
+ * url (/), the referer (if given) and the user-agent (if given).
  */
 bool DarkHttpd::Connection::parse_request() {
   /* parse method */
@@ -1886,91 +1839,35 @@ class DirLister {
       case '_':
       case '~':
         return true;
+      default:
+        return false;
     }
-    return false;
   }
 
-  /* Append buffer code.  A somewhat efficient string buffer with pool-based
- * reallocation.
- */
-#ifndef APBUF_INIT
-#define APBUF_INIT 4096
-#endif
-
-  // the below should probably be configurable rather than hard coded at same size as default init.
-#define APBUF_GROW APBUF_INIT
-
-  struct apbuf { // this looks like an std::vector<char>
-    size_t length;
-    size_t pool;
-    char *str;
-
-    apbuf() {
-      length = 0;
-      pool = APBUF_INIT;
-      str = static_cast<char *>(xmalloc(pool));
-    }
-
-    /* Append s (of length len) to buf. */
-    void appendl(const char *s, const size_t len) {
-      size_t need = length + len;
-      if (pool < need) {
-        /* pool has dried up */
-        while (pool < need) {
-          pool += APBUF_GROW;
-        }
-        str = static_cast<char *>(xrealloc(str, pool));
-      }
-      memcpy(str + length, s, len);
-      length += len;
-    }
-
-    void appendl(const Vsprinter &vs) {
-      appendl(vs.pointer, vs.length);
-    }
-
-    void appendf(const char *format, ...) checkFargs(2, 3) {
-      va_list va;
-      va_start(va, format);
-      appendl(Vsprinter(format, va));
-      va_end(va);
-    }
-  };
-
-  // the following is a minor performance enhancement:
-#ifdef __GNUC__
-#define append(buf, s) buf->appendl(s, (__builtin_constant_p(s) ? sizeof(s) - 1 : strlen(s)))
-#else
-  static void append(struct apbuf *buf, const char *s) {
-    buf->appendl(s, strlen(s));
-  }
-#endif
-
+  //apbuf was used in one place and is very mundane code. This server is not particularly swift as it is so we drop this in favor of trusting libc and the OS to be good enough at this very frequenly used feature of an OS.
 
   /* Escape < > & ' " into HTML entities. */
-  static void append_escaped(apbuf *dst, const char *src) {
-    int pos = 0;
-    while (src[pos] != '\0') {
-      switch (src[pos]) {
+  static void append_escaped(DarkHttpd::Fd dst, const char *src) {
+    while (auto c = *src++) {
+      switch (c) {
         case '<':
-          append(dst, "&lt;");
+          dst.printf("&lt;");
           break;
         case '>':
-          append(dst, "&gt;");
+          dst.printf("&gt;");
           break;
         case '&':
-          append(dst, "&amp;");
+          dst.printf("&amp;");
           break;
         case '\'':
-          append(dst, "&apos;");
+          dst.printf("&apos;");
           break;
         case '"':
-          append(dst, "&quot;");
+          dst.printf("&quot;");
           break;
         default:
-          dst->appendl(src + pos, 1);
+          dst.printf("%c", c); //todo:putc
       }
-      pos++;
     }
   }
 
@@ -1978,19 +1875,16 @@ public:
   /* Encode string to be an RFC3986-compliant URL part.
    * Contributed by nf.
    */
-  static void htmlencode(const char *src, char *dest) {
+  static void htmlencode(DarkHttpd::Fd reply_fd, char *src) {
     static const char hex[] = "0123456789ABCDEF";
 
     while (char c = *src++) {
       if (!is_unreserved(c)) {
-        *dest++ = '%';
-        *dest++ = hex[0xF & c >> 4];
-        *dest++ = hex[0xF & c];
+        reply_fd.printf("\%%c%c", c);
       } else {
-        *dest++ = c;
+        reply_fd.printf("%c", c);
       }
     }
-    *dest++ = '\0';
   }
 
   DirLister(DarkHttpd::Connection &conn) : conn{conn} {}
@@ -2013,58 +1907,52 @@ public:
       return;
     }
 
-    apbuf *listing = new apbuf();
-    append(listing, "<!DOCTYPE html>\n<html>\n<head>\n<title>");
-    append_escaped(listing, decoded_url);
-    append(listing,
+    conn.startReply(200, "OK");
+
+    conn.reply.content_fd.printf("<!DOCTYPE html>\n<html>\n<head>\n<title>");
+    append_escaped(conn.reply.content_fd, decoded_url);
+    conn.reply.content_fd.printf(
       "</title>\n"
       "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
       "</head>\n<body>\n<h1>");
-    append_escaped(listing, decoded_url);
-    append(listing, "</h1>\n<table border=\"0\">\n");
+    append_escaped(conn.reply.content_fd, decoded_url);
+    conn.reply.content_fd.printf("</h1>\n<table border=\"0\">\n");
 
     for (int i = 0; i < listsize; i++) {
-      /* If a filename is made up of entirely unsafe html chars,
-       * the url would be three times its original length.
-       */
-      char safe_url[MAXNAMLEN * 3 + 1];
+      conn.reply.content_fd.printf("<tr>td><a href=\"");
 
-      htmlencode(list[i]->name, safe_url);
+      htmlencode(conn.reply.content_fd, list[i]->name);
 
-      append(listing, "<tr>td><a href=\"");
-      append(listing, safe_url);
       if (list[i]->is_dir) {
-        append(listing, "/");
+        conn.reply.content_fd.printf("/");
       }
-      append(listing, "\">");
-      append_escaped(listing, list[i]->name);
+      conn.reply.content_fd.printf("\">");
+      append_escaped(conn.reply.content_fd, list[i]->name);
       if (list[i]->is_dir) {
-        append(listing, "/");
+        conn.reply.content_fd.printf("/");
       }
-      append(listing, "</a></td><td>");
+      conn.reply.content_fd.printf("</a></td><td>");
 
       char mtimeImage[DIR_LIST_MTIME_SIZE];
       tm tm;
-      localtime_r(&list[i]->mtime.tv_sec, &tm);//local computer time? should be option between that and a tz from header.
+      localtime_r(&list[i]->mtime.tv_sec, &tm); //local computer time? should be option between that and a tz from header.
       strftime(mtimeImage, sizeof mtimeImage, DIR_LIST_MTIME_FORMAT, &tm);
-      append(listing, mtimeImage);
-      append(listing, "</td><td>");
+
+      conn.reply.content_fd.printf(mtimeImage);
+      conn.reply.content_fd.printf("</td><td>");
       if (!list[i]->is_dir) {
-        listing->appendf("%10llu", llu(list[i]->size));
+        conn.reply.content_fd.printf("%10llu", llu(list[i]->size));
       }
-      append(listing,"</td></tr>\n");
+      conn.reply.content_fd.printf("</td></tr>\n");
     }
 
     cleanup_sorted_dirlist(list, listsize);
     free(list);
 
-    append(listing, "</table>\n<hr>\n");
 
-    append(listing, conn.service.generated_on(conn.service.now.image));
-    append(listing, "</body>\n</html>\n");
-
+    conn.reply.content_fd.printf("</table>\n");
+    conn.addFooter();
     conn.endReply();
-    free(listing); /* don't free inside of listing */
 
     conn.startCommonHeader(200, "OK", conn.reply.file_length);
     conn.catFixed("Content-Type: text/html; charset=UTF-8\r\n");
@@ -2113,7 +2001,7 @@ void DarkHttpd::Connection::process_get() {
 
   if (decoded_url.endsWith('/')) {
     /* does it end in a slash? serve up url/index_name */
-    target.cat( service.index_name);
+    target.cat(service.index_name);
     if (!file_exists(target)) {
       if (service.no_listing) {
         /* Return 404 instead of 403 to make --no-listing
@@ -2129,7 +2017,7 @@ void DarkHttpd::Connection::process_get() {
     mimetype = service.url_content_type(service.index_name);
   } else {
     /* points to a file */
-    target=  decoded_url;
+    target = decoded_url;
     mimetype = service.url_content_type(decoded_url);
   }
 
@@ -2264,7 +2152,7 @@ void DarkHttpd::Connection::poll_recv_request() {
   // char buf[1 << 15]; //32k is excessive, refuse any request that is longer than a header+maximum filename + any options allowed with a '?' for processing a file (of which the only ones of interest are directory listing options).
   assert(state == RECV_REQUEST);
   ssize_t recvd = recv(socket, received.begin(), sizeof(theRequest) - received.length, 0);
-  debug("poll_recv_request(%d) got %d bytes\n", int(socket), (int) recvd);
+  debug("poll_recv_request(%d) got %d bytes\n", int(socket), int(recvd));
   if (recvd == -1) {
     if (errno == EAGAIN) {
       debug("poll_recv_request would have blocked\n");
@@ -2715,7 +2603,7 @@ void DarkHttpd::stop_running(int sig unused) {
   }
 }
 
-// too soon, giving me gried with deleted functions that are the main reason ostream exists.
+// too soon, giving me grief with deleted functions that are the main reason ostream exists.
 // std::ostream operator<<( std::ostream & lhs, const struct timeval & rhs) {
 //   return lhs << rhs.tv_sec <<'.'<<rhs.tv_usec / 10000;//todo: fixed with zero filled format for second field
 // }
@@ -2786,7 +2674,6 @@ void DarkHttpd::prepareToRun() {
 
   pid.create();
 
-
   if (want_daemon) {
     daemonize_finish();
   }
@@ -2794,7 +2681,6 @@ void DarkHttpd::prepareToRun() {
 
 void DarkHttpd::freeall() {
   /* close and free connections */
-
   for (auto conn: entries) {
     entries.remove(conn);
     conn->clear();
@@ -2833,7 +2719,7 @@ int DarkHttpd::main(int argc, char **argv) {
   if (logfile) {
     fclose(logfile); //guarantees we don't lose a final message.
   }
-  freeall(); //gratuitous, ending a process makes this moot.
+  freeall(); //gratuitous, ending a process makes this moot, except for memory leak detector.
   reportStats();
   return exitcode;
 }

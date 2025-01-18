@@ -476,6 +476,9 @@ public:
         begin.recycle();
         end.recycle();
       }
+      ByteRange() {
+        recycle();
+      }
     } range;
 
     bool conn_closed = true; //move this back to connection itself.
@@ -709,8 +712,9 @@ private:
   bool want_daemon = false;
   bool want_accf = false;
   bool want_keepalive = true;
+  public://bridge for directory lister.
   bool want_server_id = true;
-
+private:
   struct Authorizer {
     AutoString key; /* NULL or "Basic base64_of_password" */ //base64 expansion of a cli arg.
     bool operator()(const char *authorization);
