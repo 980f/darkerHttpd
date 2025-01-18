@@ -1997,7 +1997,7 @@ public:
 
   //was generate_dir_listing
   void operator()(const char *path, const char *decoded_url) {
-    size_t maxlen = 3; /* There has to be ".." */
+    // size_t maxlen = 3; /* There has to be ".." */
 
     dlent **list;
     ssize_t listsize = make_sorted_dirlist(path, &list);
@@ -2013,16 +2013,6 @@ public:
       return;
     }
 
-    for (int i = 0; i < listsize; i++) {
-      size_t tmp = strlen(list[i]->name);
-      if (list[i]->is_dir) {
-        tmp++; /* add 1 for '/' */
-      }
-      if (maxlen < tmp) {
-        maxlen = tmp;
-      }
-    }
-
     apbuf *listing = new apbuf();
     append(listing, "<!DOCTYPE html>\n<html>\n<head>\n<title>");
     append_escaped(listing, decoded_url);
@@ -2031,12 +2021,7 @@ public:
       "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
       "</head>\n<body>\n<h1>");
     append_escaped(listing, decoded_url);
-    append(listing, "</h1>\n<pre>\n");
-
-    AutoString spaces = static_cast<char *>(xmalloc(maxlen));
-    memset(spaces.pointer, ' ', maxlen);
-
-    //we don't allow escaping the root of www and all incoming requests are relative to it, what else would they be relative to?
+    append(listing, "</h1>\n<table border=\"0\">\n");
 
     for (int i = 0; i < listsize; i++) {
       /* If a filename is made up of entirely unsafe html chars,
@@ -2046,37 +2031,34 @@ public:
 
       htmlencode(list[i]->name, safe_url);
 
-      append(listing, "<a href=\"");
+      append(listing, "<tr>td><a href=\"");
       append(listing, safe_url);
       if (list[i]->is_dir) {
         append(listing, "/");
       }
       append(listing, "\">");
       append_escaped(listing, list[i]->name);
-      append(listing, "</a>");
-
-      char buf[DIR_LIST_MTIME_SIZE];
-      tm tm;
-      localtime_r(&list[i]->mtime.tv_sec, &tm);
-      strftime(buf, sizeof buf, DIR_LIST_MTIME_FORMAT, &tm);
-
       if (list[i]->is_dir) {
         append(listing, "/");
-        listing->appendl(spaces, maxlen - strlen(list[i]->name));
-        append(listing, buf);
-        append(listing, "\n");
-      } else {
-        listing->appendl(spaces, maxlen - strlen(list[i]->name));
-        append(listing, " ");
-        append(listing, buf);
-        listing->appendf(" %10llu\n", llu(list[i]->size));
       }
+      append(listing, "</a></td><td>");
+
+      char mtimeImage[DIR_LIST_MTIME_SIZE];
+      tm tm;
+      localtime_r(&list[i]->mtime.tv_sec, &tm);//local computer time? should be option between that and a tz from header.
+      strftime(mtimeImage, sizeof mtimeImage, DIR_LIST_MTIME_FORMAT, &tm);
+      append(listing, mtimeImage);
+      append(listing, "</td><td>");
+      if (!list[i]->is_dir) {
+        listing->appendf("%10llu", llu(list[i]->size));
+      }
+      append(listing,"</td></tr>\n");
     }
 
     cleanup_sorted_dirlist(list, listsize);
     free(list);
 
-    append(listing, "</pre>\n<hr>\n");
+    append(listing, "</table>\n<hr>\n");
 
     append(listing, conn.service.generated_on(conn.service.now.image));
     append(listing, "</body>\n</html>\n");
