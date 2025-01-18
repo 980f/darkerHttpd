@@ -2036,10 +2036,7 @@ public:
     AutoString spaces = static_cast<char *>(xmalloc(maxlen));
     memset(spaces.pointer, ' ', maxlen);
 
-    /* append ".." entry if not in wwwroot */
-    if (strncmp(path, conn.service.wwwroot.begin(), std::min((strlen(path) - 1), conn.service.wwwroot.length)) != 0) {
-      append(listing, "<a href=\"../\">..</a>/\n");
-    }
+    //we don't allow escaping the root of www and all incoming requests are relative to it, what else would they be relative to?
 
     for (int i = 0; i < listsize; i++) {
       /* If a filename is made up of entirely unsafe html chars,
@@ -2134,7 +2131,7 @@ void DarkHttpd::Connection::process_get() {
 
   if (decoded_url.endsWith('/')) {
     /* does it end in a slash? serve up url/index_name */
-    xasprintf(target, "%s%s%s", service.wwwroot.pointer, decoded_url.pointer, service.index_name);
+    target.cat( service.index_name);
     if (!file_exists(target)) {
       if (service.no_listing) {
         /* Return 404 instead of 403 to make --no-listing
@@ -2144,14 +2141,13 @@ void DarkHttpd::Connection::process_get() {
         default_reply(404, "Not Found", "The URL you requested was not found.");
         return;
       }
-      xasprintf(target, "%s%s", service.wwwroot.pointer, decoded_url.pointer);
-      generate_dir_listing(target, decoded_url);
+      generate_dir_listing(decoded_url, decoded_url);
       return;
     }
     mimetype = service.url_content_type(service.index_name);
   } else {
     /* points to a file */
-    xasprintf(target, "%s%s", service.wwwroot.pointer, decoded_url.pointer);
+    target=  decoded_url;
     mimetype = service.url_content_type(decoded_url);
   }
 
