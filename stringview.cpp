@@ -75,24 +75,33 @@ ssize_t StringView::lookAhead(char sought) const {
   return -1;
 }
 
-void StringView::chop(size_t moveStart) {
+StringView StringView::chop(size_t moveStart) {
+  StringView discard(begin(),moveStart);
   if (moveStart > length) {
+    discard.length = length;
     start = length;
     length = 0;
-    return;
+  } else {
+    start += moveStart;
+    length -= moveStart;
   }
-  start += moveStart;
-  length -= moveStart;
+  return discard;
 }
 
-StringView StringView::cutToken(char termchar) {
+StringView StringView::cutToken(char termchar, bool orToEnd) {
   if (notTrivial()) {
     auto cutpoint = lookAhead(termchar);
     if (cutpoint == -1) {
-      //todo: what do we do?
+      if (orToEnd) {
+        StringView token = StringView(begin(), length); //limit new view as much as possible, no looking back in front of it.
+        start=length;//null this one, but don't much with its pointer as we may be an AutoString
+        return token;
+      } else {
+        return StringView(nullptr,0,0);
+      }
     } else {
-      StringView token = StringView(pointer + start, length - cutpoint - 1); //limit new view as much as possible, no looking back in front of it.
-      chop(token.length);
+      StringView token = StringView(begin(), length - cutpoint - 1); //limit new view as much as possible, no looking back in front of it.
+      chop(cutpoint + 1);//remove termchar along with what preceded it.
       return token;
     }
   }
@@ -117,7 +126,7 @@ void StringView::trimLeading(const char *trailers) {
 }
 
 // keep for a little while, it was needed at one time
-// /** @returns nullptr if the line is blank or EOL or EOL comment char, else points to first char not a space nor a tab */
+// /** @returns nullptr if the line is blank or EOL or the EOL comment char, else points to first char not a space nor a tab */
 // static const char *removeLeadingWhitespace(const char *text) {
 //   auto first = strspn(text, " \t\n\r");
 //
@@ -174,8 +183,8 @@ long long int StringView::cutNumber() {
   return number;
 }
 
-char * StringView::find(char c) {
-  for (char *scanner=begin(); scanner!=end(); scanner++) {
+char *StringView::find(char c) {
+  for (char *scanner = begin(); scanner != end(); scanner++) {
     if (*scanner == c) {
       return scanner;
     }

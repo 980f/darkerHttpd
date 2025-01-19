@@ -186,9 +186,10 @@ public:
 #define unused
 #endif
 
-static_assert(sizeof(unsigned long long) >= sizeof(off_t), "inadequate ull, not large enough for an off_t");
 
 //for printf, make it easy to know which token to use by forcing the data to the largest integer supported by it.
+static_assert(sizeof(unsigned long long) >= sizeof(off_t), "inadequate ull, not large enough for an off_t");
+
 template<typename Integrish> auto llu(Integrish x) {
   return static_cast<unsigned long long>(x);
 }
@@ -209,8 +210,6 @@ static void err(int code, const char *format, ...) {
   va_end(va);
   throw DarkException(code);;
 }
-
-#define errx(first, second, ... ) err( - (first), second, ## __VA_ARGS__ )
 
 static void warn(const char *format, ...) checkFargs(1, 2);
 
@@ -234,16 +233,7 @@ static void xclose(Fd fd) {
 static void *xmalloc(const size_t size) {
   void *ptr = malloc(size);
   if (ptr == nullptr) {
-    errx(1, "can't allocate %zu bytes", size);
-  }
-  return ptr;
-}
-
-/* realloc() that dies if it can't reallocate. */
-static void *xrealloc(void *original, const size_t size) {
-  void *ptr = realloc(original, size);
-  if (ptr == nullptr) {
-    errx(1, "can't reallocate %zu bytes", size);
+    err(-1, "can't allocate %zu bytes", size);
   }
   return ptr;
 }
@@ -382,7 +372,7 @@ bool Inaddr6::isMulticast() const {
 bool SockAddr6::presentationToNetwork(const char *bindaddr) {
   addr6.clear();
   if (inet_pton(AF_INET6, bindaddr ? bindaddr : "::", &addr6) != 1) {
-    errx(1, "malformed --addr argument");
+    err(-1, "malformed --addr argument");
     return false;
   }
   return true;
@@ -501,7 +491,7 @@ void Server::init_sockin() {
 #ifdef HAVE_INET6
   if (inet6) {
     if (!sock6.presentationToNetwork(bindaddr)) {
-      errx(1, "malformed --addr argument");
+      err(-1, "malformed --addr argument");
     }
     sockin = socket(PF_INET6, SOCK_STREAM, 0);
   } else
@@ -510,7 +500,7 @@ void Server::init_sockin() {
     memset(&addrin, 0, sizeof(addrin));
     addrin.sin_addr.s_addr = bindaddr ? inet_addr(bindaddr) : INADDR_ANY;
     if (addrin.sin_addr.s_addr == (in_addr_t) INADDR_NONE) {
-      errx(1, "malformed --addr argument");
+      err(-1, "malformed --addr argument");
     }
     sockin = socket(PF_INET, SOCK_STREAM, 0);
   }
@@ -678,60 +668,6 @@ void Server::usage(const char *argv0) {
 #endif
 }
 
-static unsigned char base64_mapped(unsigned char low6bits) {
-#if 1 // less code bytes
-  low6bits &= 63; // do this here instead of at all points of use.
-  return low6bits + (low6bits < 26 ?
-                       'A' :
-                       low6bits < 52 ?
-                         'a' - 26 :
-                         low6bits < 62 ?
-                           '0' - 52 :
-                           (low6bits == 62 ? '+' : '/') - low6bits);
-#else // easier to read
-  const char *base64_table = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                             "abcdefghijklmnopqrstuvwxyz"
-                             "0123456789"
-                             "+/"; // reformatter kept on trashing the array so I made it into strings.
-  return base64_table[0x3F & low6bits];
-#endif
-}
-
-// bug-fixed: DarkHttpd's base 64 encoder output excess chars at end of string when padding is needed.
-static char *base64_encode(char *str) {
-  unsigned input_length = strlen(str);
-  unsigned output_length = 4 * ((input_length + 2) / 3);
-
-  auto encoded_data = static_cast<char *>(malloc(output_length + 1));
-  if (encoded_data == nullptr) {
-    return nullptr;
-  }
-  auto writer = encoded_data;
-
-  for (int i = 0; i < input_length; ++i) {
-    unsigned char first = *str++; // i already tested by 'for'
-    *writer++ = base64_mapped(first >> 2); // top 6 leaves 2 behind
-    if (i++ < input_length) {
-      unsigned char second = *str++;
-      *writer++ = base64_mapped(first << 4 | second >> 4); // 2 to high nibble and 4 from new to low
-      if (i++ < input_length) {
-        unsigned char third = *str++;
-        *writer++ = base64_mapped(second << 2 | third >> 6); // 4 low become high of 6, need 2 from next one
-        *writer++ = base64_mapped(third); // final 6
-      } else {
-        *writer++ = '='; // pad after 2nd
-      }
-    } else {
-      *writer++ = base64_mapped(first << 4); // 2 to high nibble then two padding
-      // prior implementation output one extra char here., 4 for every 3 and then the pads.
-      *writer++ = '=';
-      *writer++ = '=';
-    }
-  }
-  *writer = 0;
-  return encoded_data;
-}
-
 /* @returns whether string is strictly a number.  Set num to NULL if disinterested in its value.
  */
 static bool str_to_num(const char *str, long long *num) {
@@ -762,7 +698,7 @@ static long long xstr_to_num(const char *str) {
   long long ret;
 
   if (!str_to_num(str, &ret)) {
-    errx(1, "number \"%s\" is invalid", str);
+    err(-1, "number \"%s\" is invalid", str);
   }
   return ret;
 }
@@ -779,7 +715,7 @@ bool Server::parse_commandline(int argc, char *argv[]) {
   wwwroot = argv[1];
   wwwroot.trimTrailing("/"); //former code only trimmed a single trailing slash, 980f trims multiple.
   if (wwwroot.length == 0) {
-    errx(1, "/path/to/wwwroot cannot be empty, nor / ");
+    err(-1, "/path/to/wwwroot cannot be empty, nor / ");
     return false;
   }
 
@@ -787,25 +723,25 @@ bool Server::parse_commandline(int argc, char *argv[]) {
   for (int i = 2; i < argc; i++) {
     if (strcmp(argv[i], "--port") == 0) {
       if (++i >= argc) {
-        errx(1, "missing number after --port");
+        err(-1, "missing number after --port");
         return false;
       }
       bindport = xstr_to_num(argv[i]);
     } else if (strcmp(argv[i], "--addr") == 0) {
       if (++i >= argc) {
-        errx(1, "missing ip after --addr");
+        err(-1, "missing ip after --addr");
         return false;
       }
       bindaddr = argv[i];
     } else if (strcmp(argv[i], "--maxconn") == 0) {
       if (++i >= argc) {
-        errx(1, "missing number after --maxconn");
+        err(-1, "missing number after --maxconn");
         return false;
       }
       max_connections = (int) xstr_to_num(argv[i]);
     } else if (strcmp(argv[i], "--log") == 0) {
       if (++i >= argc) {
-        errx(1, "missing filename after --log");
+        err(-1, "missing filename after --log");
         return false;
       }
       logfile_name = argv[i];
@@ -817,7 +753,7 @@ bool Server::parse_commandline(int argc, char *argv[]) {
 #endif
     } else if (strcmp(argv[i], "--index") == 0) {
       if (++i >= argc) {
-        errx(1, "missing filename after --index");
+        err(-1, "missing filename after --index");
         return false;
       }
       index_name = argv[i];
@@ -825,19 +761,19 @@ bool Server::parse_commandline(int argc, char *argv[]) {
       no_listing = true;
     } else if (strcmp(argv[i], "--mimetypes") == 0) {
       if (++i >= argc) {
-        errx(1, "missing filename after --mimetypes");
+        err(-1, "missing filename after --mimetypes");
         return false;
       }
       load_mime_map_file(argv[i]);
     } else if (strcmp(argv[i], "--default-mimetype") == 0) {
       if (++i >= argc) {
-        errx(1, "missing string after --default-mimetype");
+        err(-1, "missing string after --default-mimetype");
         return false;
       }
       default_mimetype = argv[i];
     } else if (strcmp(argv[i], "--uid") == 0) {
       if (++i >= argc) {
-        errx(1, "missing uid after --uid");
+        err(-1, "missing uid after --uid");
         return false;
       }
       passwd *p = getpwnam(argv[i]);
@@ -845,13 +781,13 @@ bool Server::parse_commandline(int argc, char *argv[]) {
         p = getpwuid((uid_t) xstr_to_num(argv[i]));
       }
       if (!p) {
-        errx(1, "no such uid: `%s'", argv[i]);
+        err(-1, "no such uid: `%s'", argv[i]);
         return false;
       }
       drop_uid = p->pw_uid;
     } else if (strcmp(argv[i], "--gid") == 0) {
       if (++i >= argc) {
-        errx(1, "missing gid after --gid");
+        err(-1, "missing gid after --gid");
         return false;
       }
       group *g = getgrnam(argv[i]);
@@ -859,13 +795,13 @@ bool Server::parse_commandline(int argc, char *argv[]) {
         g = getgrgid((gid_t) xstr_to_num(argv[i]));
       }
       if (!g) {
-        errx(1, "no such gid: `%s'", argv[i]);
+        err(-1, "no such gid: `%s'", argv[i]);
       }
       drop_gid = g->gr_gid;
 #if DarklySupportDaemon
     } else if (strcmp(argv[i], "--pidfile") == 0) {
       if (++i >= argc) {
-        errx(1, "missing filename after --pidfile");
+        err(-1, "missing filename after --pidfile");
       }
       d.pid.file_name = argv[i];
 #endif
@@ -878,17 +814,17 @@ bool Server::parse_commandline(int argc, char *argv[]) {
 #if DarklySupportForwarding
     } else if (strcmp(argv[i], "--forward") == 0) {
       if (++i >= argc) {
-        errx(1, "missing host after --forward");
+        err(-1, "missing host after --forward");
       }
       const char *host = argv[i];
       if (++i >= argc) {
-        errx(1, "missing url after --forward");
+        err(-1, "missing url after --forward");
       }
       const char *url = argv[i];
       forward.map.add(host, url);
     } else if (strcmp(argv[i], "--forward-all") == 0) {
       if (++i >= argc) {
-        errx(1, "missing url after --forward-all");
+        err(-1, "missing url after --forward-all");
       }
       forward.all_url = argv[i];
     } else if (strcmp(argv[i], "--forward-https") == 0) {
@@ -898,20 +834,20 @@ bool Server::parse_commandline(int argc, char *argv[]) {
       want_server_id = false;
     } else if (strcmp(argv[i], "--timeout") == 0) {
       if (++i >= argc) {
-        errx(1, "missing number after --timeout");
+        err(-1, "missing number after --timeout");
       }
       timeout_secs = (int) xstr_to_num(argv[i]);
     } else if (strcmp(argv[i], "--auth") == 0) {
       if (++i >= argc || strchr(argv[i], ':') == nullptr) {
-        errx(1, "missing 'user:pass' after --auth");
+        err(-1, "missing 'user:pass' after --auth");
       }
-      auth.key = reinterpret_cast<char *>(base64_encode(argv[i]));
+      auth.key = argv[i]; //todo: encrypt so memory inspection doesn't leak password
     } else if (strcmp(argv[i], "--header") == 0) {
       if (++i >= argc) {
-        errx(1, "missing argument after --header");
+        err(-1, "missing argument after --header");
       }
       if (strchr(argv[i], '\n') != nullptr || strstr(argv[i], ": ") == nullptr) {
-        errx(1, "malformed argument after --header");
+        err(-1, "malformed argument after --header");
       }
       //the following is not efficient, what we really need is a list of strings that we cat together in the stream output.
       custom_hdrs.push_back(argv[i]);
@@ -922,7 +858,7 @@ bool Server::parse_commandline(int argc, char *argv[]) {
     }
 #endif
     else {
-      errx(1, "unknown argument `%s'", argv[i]);
+      err(-1, "unknown argument `%s'", argv[i]);
       return false;
     }
   }
@@ -964,6 +900,7 @@ void Server::accept_connection() {
 
   /* Allocate and initialize struct connection. */
   conn = new Connection(*this, fd); // connections have defaults from the DarkHttpd that creates them.
+  connections.push_front(conn);
 
 #ifdef HAVE_INET6
   if (inet6) {
@@ -973,7 +910,7 @@ void Server::accept_connection() {
   {
     *reinterpret_cast<in_addr_t *>(&conn->client) = addrin.sin_addr.s_addr;
   }
-  connections.push_front(conn);
+
 
   debug("accepted connection from %s:%u (fd %d)\n", inet_ntoa(addrin.sin_addr), ntohs(addrin.sin_port), int(conn->socket));
 
@@ -1094,7 +1031,7 @@ void Server::log_connection(const Connection *conn) {
 
 int Connection::ByteRange::parse(StringView rangeline) {
   //todo: allow range operand type default?
-  auto prefix = rangeline.cutToken('=');
+  auto prefix = rangeline.cutToken('=', false);
   if (!prefix) {
     return 498;
   }
@@ -1216,7 +1153,7 @@ static char *urldecode(const char *url) {
   while (char c = *url++) {
     if (c == '%' && url[1] && isxdigit(url[1]) // because we have already used strlen we know there is a null char we can rely upon here
         && url[2] && isxdigit(url[2])) {
-      *writer++ = HEX_TO_DIGIT(*url++) << 4 + HEX_TO_DIGIT(*url++);
+      *writer++ = HEX_TO_DIGIT(*url++) << 4 | HEX_TO_DIGIT(*url++);
       continue;
     }
     *writer++ = c; /* straight copy */
@@ -1282,9 +1219,8 @@ void Connection::startCommonHeader(int errcode, const char *errtext, off_t conte
 
 
 void Connection::catAuth() {
-  if (service.auth.key) {
-    reply.header_fd.printf( //AI: "Authorization: Basic %s\r\n", service.auth_key); //leak our key to the world!!
-      "WWW-Authenticate: Basic realm=\"User Visible Realm\"\r\n");
+  if (service.auth.key.notTrivial()) {
+    reply.header_fd.printf("WWW-Authenticate: Basic realm=\"User Visible Realm\"\r\n");
   }
 }
 
@@ -1388,7 +1324,7 @@ void Connection::redirect_https() {
 bool Connection::parse_request() {
   /* parse method */
   StringView scanner = theRequest;
-  auto methodToken = scanner.cutToken(' ');
+  auto methodToken = scanner.cutToken(' ', false);
   if (!methodToken) {
     return false; //garble or too short to process
   }
@@ -1400,7 +1336,7 @@ bool Connection::parse_request() {
     method = NotMine;
   }
 
-  url = scanner.cutToken(' ');
+  url = scanner.cutToken(' ', false);
   if (!url) {
     return false;
   }
@@ -1411,14 +1347,14 @@ bool Connection::parse_request() {
     *urlParams++ = '\0'; //modifies url!
   }
 
-  auto proto = scanner.cutToken('\n');
+  auto proto = scanner.cutToken('\n', false);
   proto.trimTrailing(" \t\r\n");
   //todo: check for http.1.
 
   //time to parse headers, as they arrive.
   do {
-    auto headerline = scanner.cutToken('\n');
-    auto headername = headerline.cutToken(':');
+    auto headerline = scanner.cutToken('\n', false);
+    auto headername = headerline.cutToken(':', false);
     //#per RFC do NOT trim trailing, we want to not get a match if someone is giving us invalid header names.
     if (!headername) {
       //todo:distinguish eof from end of header
@@ -1478,7 +1414,7 @@ static bool file_exists(const char *path) {
 }
 
 class HtmlDirLister {
-  DarkHttpd::Connection &conn;
+  Connection &conn;
 
 
   /* Is this an unreserved character according to
@@ -1541,7 +1477,7 @@ public:
 
     while (char c = *src++) {
       if (!is_unreserved(c)) {
-        reply_fd.printf("\%%c%c", c);
+        reply_fd.printf("\%%c%c", hex[c >> 4], hex[c & 0xF]);
       } else {
         reply_fd.printf("%c", c);
       }
@@ -1576,38 +1512,38 @@ public:
   /* listing mechanism, a reworking of what stat returns for a name */
   class DirectoryListing {
     struct dlent {
-      char *name = nullptr; /* The name/path of the entry.                 */
-      bool is_dir = false; /* If the entry is a directory and not a file. */
-      size_t size = 0; /* The size of the entry, in bytes.            */
-      timespec mtime; /* When the file was last modified.            */
-      bool nameIsMalloced;
-      dlent(bool dynamicName): mtime{0, 0}, nameIsMalloced{dynamicName} {}
+      char *name = nullptr; /* The strdup'd name/path of the entry.       */
+      bool is_dir = false;  /* If the entry is a directory and not a file. */
+      size_t size = 0;      /* The size of the entry, in bytes.            */
+      timespec mtime;       /* When the file was last modified.            */
+
+      dlent(): mtime{0, 0} {}
 
       ~dlent() {
-        if (nameIsMalloced) {
-          free(name);
-        }
+        free(name);
       }
 
-      static int sortOnName(dlent &a, dlent &b) {
-        return strcmp(a.name, b.name);
+      static int sortOnName(dlent *a, dlent *b) {
+        return strcmp(a->name, b->name);
       }
-
       //can add other standard sorts here.
     };
 
   public:
-    std::forward_list<dlent> ing; //this name will make sense at point of use.
+    std::forward_list<dlent *> ing; //this name will make sense at point of use.
 
     /* Make sorted list of files in a directory.  Returns number of entries, or -1
      * if error occurs.
      */
     ~DirectoryListing() {
+      for (auto dlent : ing) {
+        free(dlent);
+      }
       ing.clear();
     }
 
   public:
-    bool operator()(const char *path) {
+    bool operator()(const char *path,bool    includeHidden) {
       DIRwrapper dir;
       if (!dir(path)) {
         return false;
@@ -1616,18 +1552,19 @@ public:
       dir.foreach([&](dirent *ent, const char *dirpath) {
         char currname[FILENAME_MAX]; //workspace for extended path.
 
-        struct stat s;
-
-        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
-          return; /* skip "." and ".." */
+        if (ent->d_name[0]=='.') {
+          if (ent->d_name[1] == 0 || ent->d_name[1] == '.'  || !includeHidden) {
+            return; /* skip "." and ".." */
+          }
         }
-        assert(strlen(ent->d_name) <= MAXNAMLEN);
-        sprintf(currname, "%s%s", dirpath, ent->d_name); //we only call this routine if we saw a '/' at the end of the path, so we don't add one here.
+
+        snprintf(currname, sizeof currname,"%s%s", dirpath, ent->d_name); //we only call this routine if we saw a '/' at the end of the path, so we don't add one here.
+        struct stat s;
         if (stat(currname, &s) == -1) {
           return; /* skip un-stat-able files */
         }
-        auto repack = new dlent(true); //true: we will malloc'ing name.
-        repack->name = xstrdup(ent->d_name);
+        auto repack = new dlent(); //#freed in DirectoryListing destructor
+        repack->name = strdup(ent->d_name); //if we run out of heap we get mullpointer, we don't want to kill the whole app when that happens but might want to stop the listing process.
         repack->is_dir = S_ISDIR(s.st_mode);
         repack->size = s.st_size;
         repack->mtime = s.st_mtim;
@@ -1639,7 +1576,7 @@ public:
     }
   };
 
-  HtmlDirLister(DarkHttpd::Connection &conn) : conn{conn} {}
+  HtmlDirLister(Connection &conn) : conn{conn} {}
 
   //was generate_dir_listing
   void operator()(const char *path, const char *decoded_url) {
@@ -1649,7 +1586,7 @@ public:
     static const char *const DIR_LIST_MTIME_FORMAT = "%Y-%m-%d %R";
     static const unsigned DIR_LIST_MTIME_SIZE = 16 + 1; /* How large the buffer will need to be. */
     DirectoryListing list;
-    if (!list(path)) { /* then an opendir() failed */
+    if (!list(path,true)) { /* then an opendir() failed */
       if (errno == EACCES) {
         conn.default_reply(403, "Forbidden", "You don't have permission to access this URL.");
       } else if (errno == ENOENT) {
@@ -1674,27 +1611,27 @@ public:
     for (auto entry: list.ing) {
       conn.reply.content_fd.printf("<tr>td><a href=\"");
 
-      htmlencode(conn.reply.content_fd, entry.name);
+      htmlencode(conn.reply.content_fd, entry->name);
 
-      if (entry.is_dir) {
+      if (entry->is_dir) {
         conn.reply.content_fd.printf("/");
       }
       conn.reply.content_fd.printf("\">");
-      append_escaped(conn.reply.content_fd, entry.name);
-      if (entry.is_dir) {
+      append_escaped(conn.reply.content_fd, entry->name);
+      if (entry->is_dir) {
         conn.reply.content_fd.printf("/");
       }
       conn.reply.content_fd.printf("</a></td><td>");
 
       char mtimeImage[DIR_LIST_MTIME_SIZE];
       tm tm;
-      localtime_r(&entry.mtime.tv_sec, &tm); //local computer time? should be option between that and a tz from header.
+      localtime_r(&entry->mtime.tv_sec, &tm); //local computer time? should be option between that and a tz from header.
       strftime(mtimeImage, sizeof mtimeImage, DIR_LIST_MTIME_FORMAT, &tm);
 
       conn.reply.content_fd.printf(mtimeImage);
       conn.reply.content_fd.printf("</td><td>");
-      if (!entry.is_dir) {
-        conn.reply.content_fd.printf("%10llu", llu(entry.size));
+      if (!entry->is_dir) {
+        conn.reply.content_fd.printf("%10llu", llu(entry->size));
       }
       conn.reply.content_fd.printf("</td></tr>\n");
     }
@@ -1823,7 +1760,7 @@ void Connection::process_get() {
         from = 0;
       }
     } else {
-      errx(1, "internal error - from/to mismatch");
+      err(-1, "internal error - from/to mismatch");
     }
 
     if (from >= filestat.st_size) {
@@ -2163,7 +2100,7 @@ void Server::httpd_poll() {
   int select_ret = select(max_fd + 1, &recv_set, &send_set, nullptr, bother_with_timeout ? &timeout : nullptr);
   if (select_ret == 0) {
     if (!bother_with_timeout) {
-      errx(1, "select() timed out");
+      err(-1, "select() timed out");
     }
   }
   if (select_ret == -1) {
@@ -2486,7 +2423,7 @@ void DarkHttpd::Daemon::PidFiler::create() {
   fd = open(file_name, O_WRONLY | O_CREAT | O_EXLOCK | O_TRUNC | O_NONBLOCK, PIDFILE_MODE);
   if (fd == -1) {
     if ((errno == EWOULDBLOCK) || (errno == EEXIST)) {
-      errx(1, "daemon already running with PID %d", file_read());
+      err(-1, "daemon already running with PID %d", file_read());
     } else {
       err(1, "can't create pidfile %s", file_name);
     }
@@ -2503,6 +2440,66 @@ void DarkHttpd::Daemon::PidFiler::create() {
 }
 #endif
 
+struct Base64Getter {
+  StringView encoded;
+  unsigned phase = 0;
+  char dregs = ~0;
+  bool inputExhausted = false;
+
+  unsigned get6() {
+    if (inputExhausted) {
+      return ~0;
+    }
+    char b64 = encoded.chop(1);
+    inputExhausted = !encoded;
+    switch (b64) {
+      case '=':
+        inputExhausted = true;
+        return ~0;
+      case '/':
+        return 63;
+      case '+':
+        return 62;
+      default:
+        if (b64 <= '9') {
+          return b64 - '0';
+        }
+        if (b64 <= 'Z') {
+          return b64 - 'A';
+        }
+        return b64 - 'a';
+    }
+  }
+
+  Base64Getter(const StringView &encoded) : encoded{encoded} {}
+
+  operator bool() const {
+    return !inputExhausted;
+  }
+
+  uint8_t operator()() {
+    unsigned acc = 0;
+    if (phase == 3) {
+      phase = 0;
+    }
+    switch (phase++) {
+      default: //appease compiler, won't ever happen.
+      case 0: //6|2
+        acc = get6() << 2;
+        dregs = get6();
+        return acc | (dregs >> 4);
+      case 1: //4|4
+        acc = dregs & 0xF << 4;
+        dregs = get6();
+        return acc | (dregs >> 4);
+      case 2: //2|6
+        acc = (dregs & 0x3) << 6;
+        dregs = get6();
+        return acc | dregs;
+    }
+  }
+};
+
 /* Returns 1 if passwords are equal, runtime is proportional to the length of
  * user_input to avoid leaking the secret's length and contents through timing
  * information.
@@ -2511,37 +2508,28 @@ bool Server::Authorizer::operator()(StringView user_input) {
   if (!key) {
     return true;
   }
-  const char *secret = key.pointer;
-  if (!user_input.notTrivial()) {
-    return false; //
+  if (!user_input) {
+    return false;
   }
   //Strip "Basic"
   user_input.trimLeading(" \t");
-  auto shouldBeBasic = user_input.cutToken(' ');
+  auto shouldBeBasic = user_input.cutToken(' ', false);
 
-  size_t i = 0;
-  size_t j = 0;
+  StringView scanner(key);
+  Base64Getter base64(user_input);
+  // size_t i = 0;
+  // size_t j = 0;
   char out = 0;
 
-  while (true) {
+  while (base64) {
     /* Out stays zero if the strings are the same. */
-    out |= user_input[i] ^ secret[j];
-
-    /* Stop at end of user_input. */
-    if (user_input[i] == 0) {
-      break;
-    }
-    i++;
-
-    /* Don't go past end of secret. */
-    if (secret[j] != 0) {
-      j++;
-    }
+    out |= base64() ^ scanner.chop(1);
   }
-
-  /* Check length after loop, otherwise early exit would leak length. */
-  out |= (i != j); /* Secret was shorter. */
-  out |= (secret[j] != 0); /* Secret was longer; j is not the end. */
+  out |= scanner.notTrivial();
+  while (scanner) { //kill time to defeat timing based attack, a stupid thing given that password length is all that could be determined and that would take a shitload of attempts and we should have rate-limiting for other reasons.
+    scanner.chop(1);
+    base64();
+  }
   return out == 0;
 }
 

@@ -65,7 +65,6 @@ struct AutoString : StringView {
     //todo: add terminating null
   }
 
-  unsigned int ccatf(const char *format, ...) const;
 };
 
 //

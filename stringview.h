@@ -6,7 +6,9 @@
 */
 
 /** a not-null terminated string that can be shrunk but not expanded.
- * This class exists so that we can sub-string without touching the original string OR copying it.*/
+ * This class exists so that we can sub-string without touching the original string OR copying it. It is a bridge while weaning Dark(er)Httpd from using dynamically mucked with strings.
+ * StringView may copy its content to new views, which can then result in use-after-free if the StringView itself was created with a pointer that gets freed.
+ */
 struct StringView {
   char *pointer = nullptr;
   size_t length = 0;
@@ -61,9 +63,9 @@ struct StringView {
   ssize_t lookAhead(char sought) const;
 
   /** move the start by @param moveStart, equivalent to removing the front of the string. */
-  void chop(size_t moveStart);
+  StringView chop(size_t moveStart);
 
-  StringView cutToken(char termchar);
+  StringView cutToken(char termchar, bool orToEnd);
 
   /** calls @see put then adds a terminator and returns a pointer to that terminator. */
   char *cat(char *bigenough, bool honorNull) const {
