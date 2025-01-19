@@ -29,6 +29,7 @@
 #include "darkhttpd.h"
 
 #include <cheaptricks.h>
+#include <fd.h>
 #include <functional>
 #include <iostream>
 
@@ -73,6 +74,8 @@ static ssize_t send_from_file(int s, int fd, off_t ofs, size_t size);
 #include <sys/wait.h>
 #include <syslog.h>
 #include <unistd.h>
+
+using namespace DarkHttpd;
 
 class DebugLog {
   bool spew = false;
@@ -220,7 +223,7 @@ static void warn(const char *format, ...) {
 }
 
 /* close() that dies on error.  */
-static void xclose(DarkHttpd::Fd fd) {
+static void xclose(Fd fd) {
   if (!fd.close()) {
     err(1, "close()");
   }
@@ -257,49 +260,6 @@ static char *xstrdup(const char *src) {
   return dest;
 }
 
-/** delete vasprintf allocation when exit scope.
- * vasprintf() internally allocates from heap, returning via a pointer to pointer with a length by normal return
-  */
-struct Vsprinter : AutoString {
-  Vsprinter(const char *format, va_list ap) {
-    length = vasprintf(&pointer, format, ap);
-  }
-
-  Vsprinter(const char *format, ...) checkFargs(2, 3) {
-    va_list va;
-    va_start(va, format);
-    length = vasprintf(&pointer, format, va);
-    va_end(va);
-  }
-};
-
-/* vasprintf() that dies if it fails. */
-static unsigned int xvasprintf(AutoString &ret, const char *format, va_list ap) checkFargs(2, 0);
-
-static unsigned int xvasprintf(AutoString &ret, const char *format, va_list ap) {
-  ret = nullptr; // forget the old
-  unsigned len = vasprintf(&ret.pointer, format, ap);
-  ret.length = len;
-  if (!ret || len == ~0) {
-    errx(1, "out of memory in vasprintf()");
-  }
-  return len;
-}
-
-/* asprintf() that dies if it fails. */
-static unsigned int xasprintf(AutoString &ret, const char *format, ...) checkFargs(2, 3);
-
-static unsigned int xasprintf(AutoString &ret, const char *format, ...) {
-  va_list va;
-  unsigned int len;
-
-  va_start(va, format);
-  len = xvasprintf(ret, format, va);
-  va_end(va);
-  return len;
-}
-
-
 /* Make the specified socket non-blocking. */
 static void nonblock_socket(const int sock) {
   int flags = fcntl(sock, F_GETFL);
@@ -319,7 +279,6 @@ static void nonblock_socket(const int sock) {
  */
 static char *make_safe_url(char *const url) {
   char *src = url;
-  char *dst;
 #define ends(c) ((c) == '/' || (c) == '\0')
 
   /* URLs not starting with a slash are illegal. */
@@ -343,7 +302,7 @@ static char *make_safe_url(char *const url) {
   }
 
   /* Copy to dst, while collapsing multi-slashes and handling dot-dirs. */
-  dst = src;
+  char *dst = src;
   while (*src) {
     if (*src != '/') {
       *dst++ = *src++;
@@ -375,59 +334,6 @@ static char *make_safe_url(char *const url) {
   return url;
 #undef ends
 }
-
-bool AutoString::cat(const char *str, size_t len) {
-  if (len == ~0) {
-    len = strlen(str);
-  }
-  auto newLength = length + len + 1;
-  auto newblock = static_cast<char *>(realloc(pointer, newLength));
-  if (!newblock) { // if nullptr then old buffer is still allocated and untouched.
-    return false;
-  }
-  // old has been freed by realloc so we don't need to also free it.
-  pointer = newblock;
-  // we aren't trusting the input to be null terminated at ssize
-  memcpy(&pointer[length], str, len);
-  length += len;
-  pointer[length] = '\0';
-  return true;
-}
-
-AutoString &AutoString::operator=(AutoString &other) {
-  free(pointer);
-  pointer = other.pointer;
-  length = other.length;
-  return *this;
-}
-
-AutoString &AutoString::operator=(char *replacement) {
-  Free();
-  pointer = replacement;
-  length = replacement ? strlen(pointer) : 0;
-  return *this;
-}
-
-AutoString &AutoString::toUpper() {
-  for (auto scanner = pointer; *scanner;) {
-    *scanner++ = toupper(*scanner);
-  }
-  return *this;
-}
-
-bool AutoString::malloc(size_t amount) {
-  if (amount == 0) {
-    return false; //don't want to find out what malloc does with a request for zero bytes.
-  }
-  Free();
-  pointer = static_cast<char *>(::malloc(amount + 1));
-  if (pointer) {
-    length = amount;
-    pointer[length] = '\0';
-  }
-  return pointer != nullptr;
-}
-
 
 Inaddr6 &Inaddr6::clear() {
   for (auto index = 4; index-- > 0;) { //gcc converts this to a memset.
@@ -484,33 +390,7 @@ bool SockAddr6::presentationToNetwork(const char *bindaddr) {
 
 /////////////////////////////////////////
 //will go away with proper signal hooking:
-DarkHttpd *DarkHttpd::forSignals = nullptr; // trusting BSS zero to clear this.
-
-
-size_t DarkHttpd::Fd::vprintln(const char *format, va_list va) {
-  FILE *stream = getStream();
-  auto added = fprintf(stream, format, va);
-  fputc('\n', stream);
-  return ++added;
-}
-
-
-size_t DarkHttpd::Fd::putln(const char *content) {
-  FILE *stream = getStream();
-  auto added = fputs(content, stream);
-  fputc('\n', stream);
-  return ++added;
-}
-
-size_t DarkHttpd::Fd::printf(const char *format, ...) {
-  FILE *stream = getStream();
-  va_list args;
-  va_start(args, format);
-  auto added = vfprintf(stream, format, args);
-  va_end(args);
-  return added;
-}
-
+Server *Server::forSignals = nullptr; // trusting BSS zero to clear this.
 
 /* Default mimetype mappings
  * //todo: use xdg-mime on systems which have it
@@ -553,7 +433,7 @@ static const char *default_extension_map = { //todo: move to class
 /* ---------------------------------------------------------------------------
  * Adds contents of specified file to mime_map list.
  */
-void DarkHttpd::load_mime_map_file(const char *filename) {
+void Server::load_mime_map_file(const char *filename) {
   auto fd = open(filename, 0);
   if (fd > 0) {
     struct stat filestat;
@@ -571,7 +451,7 @@ void DarkHttpd::load_mime_map_file(const char *filename) {
 }
 
 
-const char *DarkHttpd::url_content_type(const char *url) {
+const char *Server::url_content_type(const char *url) {
   if (url) {
     if (auto period = strrchr(url, '.')) {
       StringView extension = const_cast<char *>(++period);
@@ -594,7 +474,7 @@ const char *DarkHttpd::url_content_type(const char *url) {
   return default_mimetype ? default_mimetype : "application/octet-stream";
 }
 
-const char *DarkHttpd::get_address_text(const void *addr) const {
+const char *Server::get_address_text(const void *addr) const {
 #ifdef HAVE_INET6
   if (inet6) {
     thread_local char text_addr[INET6_ADDRSTRLEN];
@@ -610,7 +490,7 @@ const char *DarkHttpd::get_address_text(const void *addr) const {
 /* Initialize the sockin global. This is the socket that we accept
  * connections from.
  */
-void DarkHttpd::init_sockin() {
+void Server::init_sockin() {
   sockaddr_in addrin;
 #ifdef HAVE_INET6
   SockAddr6 sock6;
@@ -722,7 +602,7 @@ void DarkHttpd::init_sockin() {
   }
 }
 
-void DarkHttpd::usage(const char *argv0) {
+void Server::usage(const char *argv0) {
   printf("usage:\t%s /path/to/wwwroot [flags]\n\n", argv0);
   printf("flags:\t--port number (default: %u, or 80 if running as root)\n"
     "\t\tSpecifies which port to listen on for connections.\n"
@@ -818,23 +698,23 @@ static unsigned char base64_mapped(unsigned char low6bits) {
 }
 
 // bug-fixed: DarkHttpd's base 64 encoder output excess chars at end of string when padding is needed.
-static unsigned char *base64_encode(char *str) {
+static char *base64_encode(char *str) {
   unsigned input_length = strlen(str);
   unsigned output_length = 4 * ((input_length + 2) / 3);
 
-  auto encoded_data = static_cast<unsigned char *>(malloc(output_length + 1));
+  auto encoded_data = static_cast<char *>(malloc(output_length + 1));
   if (encoded_data == nullptr) {
     return nullptr;
   }
   auto writer = encoded_data;
 
-  for (int i = 0; i < input_length;) {
+  for (int i = 0; i < input_length; ++i) {
     unsigned char first = *str++; // i already tested by 'for'
     *writer++ = base64_mapped(first >> 2); // top 6 leaves 2 behind
-    if (i < input_length) {
+    if (i++ < input_length) {
       unsigned char second = *str++;
       *writer++ = base64_mapped(first << 4 | second >> 4); // 2 to high nibble and 4 from new to low
-      if (i < input_length) {
+      if (i++ < input_length) {
         unsigned char third = *str++;
         *writer++ = base64_mapped(second << 2 | third >> 6); // 4 low become high of 6, need 2 from next one
         *writer++ = base64_mapped(third); // final 6
@@ -887,7 +767,7 @@ static long long xstr_to_num(const char *str) {
   return ret;
 }
 
-bool DarkHttpd::parse_commandline(int argc, char *argv[]) {
+bool Server::parse_commandline(int argc, char *argv[]) {
   if (argc < 2 || (argc == 2 && strcmp(argv[1], "--help") == 0)) {
     usage(argv[0]); /* no wwwroot given */
     // exit(EXIT_SUCCESS);
@@ -1025,9 +905,7 @@ bool DarkHttpd::parse_commandline(int argc, char *argv[]) {
       if (++i >= argc || strchr(argv[i], ':') == nullptr) {
         errx(1, "missing 'user:pass' after --auth");
       }
-
-      AutoString key = reinterpret_cast<char *>(base64_encode(argv[i]));
-      xasprintf(auth.key, "Basic %s", key.pointer);
+      auth.key = reinterpret_cast<char *>(base64_encode(argv[i]));
     } else if (strcmp(argv[i], "--header") == 0) {
       if (++i >= argc) {
         errx(1, "missing argument after --header");
@@ -1053,7 +931,7 @@ bool DarkHttpd::parse_commandline(int argc, char *argv[]) {
 
 
 /* Accept a connection from sockin and add it to the connection queue. */
-void DarkHttpd::accept_connection() {
+void Server::accept_connection() {
   sockaddr_in addrin;
 #ifdef HAVE_INET6
   sockaddr_in6 addrin6;
@@ -1144,7 +1022,7 @@ static char *clf_date(char *dest, time_t when) {
 }
 
 /* Add a connection's details to the logfile. */
-void DarkHttpd::log_connection(const Connection *conn) {
+void Server::log_connection(const Connection *conn) {
   AutoString safe_method;
   AutoString safe_url;
   AutoString safe_referer;
@@ -1214,7 +1092,7 @@ void DarkHttpd::log_connection(const Connection *conn) {
  * "Range: 789 -  from 789 to end
  */
 
-int DarkHttpd::Connection::ByteRange::parse(StringView rangeline) {
+int Connection::ByteRange::parse(StringView rangeline) {
   //todo: allow range operand type default?
   auto prefix = rangeline.cutToken('=');
   if (!prefix) {
@@ -1245,7 +1123,7 @@ int DarkHttpd::Connection::ByteRange::parse(StringView rangeline) {
   return 499; //todo: proper value
 }
 
-void DarkHttpd::Connection::Replier::recycle() {
+void Connection::Replier::recycle() {
   header_dont_free = false;
   dont_free = false;
   header_sent = 0;
@@ -1258,14 +1136,14 @@ void DarkHttpd::Connection::Replier::recycle() {
   total_sent = 0;
 }
 
-DarkHttpd::Connection::Connection(DarkHttpd &parent, int fd): socket(fd), service(parent), theRequest{}, method{}, hostname{nullptr}, url{nullptr}, referer{nullptr}, user_agent{nullptr}, authorization{nullptr}, if_mod_since{nullptr}, is_https_redirect{false} {
+Connection::Connection(Server &parent, int fd): socket(fd), service(parent), theRequest{}, method{}, hostname{nullptr}, url{nullptr}, urlParams{nullptr}, referer{nullptr}, user_agent{nullptr}, authorization{nullptr}, if_mod_since{nullptr}, is_https_redirect{false} {
   memset(&client, 0, sizeof(client));
   nonblock_socket(socket);
   state = RECV_REQUEST;
   last_active = service.now;
 }
 
-void DarkHttpd::Connection::clear() {
+void Connection::clear() {
   received.length = 0; //forget the past request,
   parsed.length = 0;
   method = NotMine;
@@ -1282,7 +1160,7 @@ void DarkHttpd::Connection::clear() {
 }
 
 /* Recycle a finished connection for HTTP/1.1 Keep-Alive. */
-void DarkHttpd::Connection::recycle() {
+void Connection::recycle() {
   clear(); //legacy, separate heap usage clear from the rest.
   debug("free_connection(%d)\n", int(socket));
   xclose(socket);
@@ -1296,7 +1174,7 @@ void DarkHttpd::Connection::recycle() {
 /* If a connection has been idle for more than timeout_secs, it will be
  * marked as DONE and killed off in httpd_poll().
  */
-void DarkHttpd::Connection::poll_check_timeout() {
+void Connection::poll_check_timeout() {
   if (service.timeout_secs > 0) {
     if (service.now - last_active >= service.timeout_secs) {
       debug("poll_check_timeout(%d) marking connection closed\n", int(socket));
@@ -1348,7 +1226,7 @@ static char *urldecode(const char *url) {
   return out;
 }
 
-void DarkHttpd::Connection::startHeader(const int errcode, const char *errtext) {
+void Connection::startHeader(const int errcode, const char *errtext) {
   if (errcode > 0) {
     reply.http_code = errcode;
   }
@@ -1358,21 +1236,21 @@ void DarkHttpd::Connection::startHeader(const int errcode, const char *errtext) 
   reply.header_fd.printf("HTTP/1.1 %d %s\r\n", reply.http_code, errtext);
 }
 
-void DarkHttpd::Connection::catDate() {
+void Connection::catDate() {
   reply.header_fd.printf("Date: %s\r\n", service.now.image);
 }
 
-void DarkHttpd::Connection::catServer() {
+void Connection::catServer() {
   if (service.want_server_id) {
     reply.header_fd.printf("Server: %s\r\n", pkgname);
   }
 }
 
-void DarkHttpd::Connection::catFixed(const char *fixedText) {
+void Connection::catFixed(const char *fixedText) {
   reply.header_fd.printf(fixedText);
 }
 
-void DarkHttpd::Connection::catKeepAlive() {
+void Connection::catKeepAlive() {
   if (conn_closed) {
     reply.header_fd.printf("Connection: close\r\n");
   } else {
@@ -1380,17 +1258,17 @@ void DarkHttpd::Connection::catKeepAlive() {
   }
 }
 
-void DarkHttpd::Connection::catCustomHeaders() {
+void Connection::catCustomHeaders() {
   for (auto custom_Hdr: service.custom_hdrs) {
     reply.header_fd.printf("%s\r\n", custom_Hdr);
   }
 }
 
-void DarkHttpd::Connection::catContentLength(off_t off) {
+void Connection::catContentLength(off_t off) {
   reply.header_fd.printf("Content-Length: %llu\r\n", llu(off));
 }
 
-void DarkHttpd::Connection::startCommonHeader(int errcode, const char *errtext, off_t contentLenght = ~0UL) {
+void Connection::startCommonHeader(int errcode, const char *errtext, off_t contentLenght = ~0UL) {
   startHeader(errcode, errtext);
   catDate();
   catServer();
@@ -1403,38 +1281,38 @@ void DarkHttpd::Connection::startCommonHeader(int errcode, const char *errtext, 
 }
 
 
-void DarkHttpd::Connection::catAuth() {
+void Connection::catAuth() {
   if (service.auth.key) {
     reply.header_fd.printf( //AI: "Authorization: Basic %s\r\n", service.auth_key); //leak our key to the world!!
       "WWW-Authenticate: Basic realm=\"User Visible Realm\"\r\n");
   }
 }
 
-void DarkHttpd::Connection::catGeneratedOn(bool toReply) {
+void Connection::catGeneratedOn(bool toReply) {
   if (service.want_server_id) {
     (toReply ? reply.content_fd : reply.header_fd).printf("Generated by %s on %s\n", pkgname, service.now.image);
   }
 }
 
 
-void DarkHttpd::Connection::endHeader() {
+void Connection::endHeader() {
   reply.header_fd.printf("\r\n");
 }
 
-void DarkHttpd::Connection::startReply(int errcode, const char *errtext) {
+void Connection::startReply(int errcode, const char *errtext) {
   //todo: open a tempfile
 
   reply.content_fd.printf("<!DOCTYPE html><html><head><title>%d %s</title></head><body>\n" "<h1>%s</h1>\n", errcode, errtext, errtext);
 }
 
-void DarkHttpd::Connection::addFooter() {
+void Connection::addFooter() {
   reply.content_fd.putln("<hr>");
   catGeneratedOn(true);
   reply.content_fd.putln("</body></html>");
 }
 
 /* A default reply for any (erroneous) occasion. */
-void DarkHttpd::Connection::default_reply(const int errcode, const char *errname, const char *format, ...) {
+void Connection::default_reply(const int errcode, const char *errname, const char *format, ...) {
   startReply(errcode, errname);
   va_list va;
   va_start(va, format);
@@ -1454,12 +1332,12 @@ void DarkHttpd::Connection::default_reply(const int errcode, const char *errname
   reply.start = 0;
 }
 
-void DarkHttpd::Connection::endReply() {
+void Connection::endReply() {
   reply.content_fd.close();
   reply.getContentLength();
 }
 
-void DarkHttpd::Connection::redirect(const char *format, ...) {
+void Connection::redirect(const char *format, ...) {
   AutoString where;
 
   va_list va;
@@ -1485,7 +1363,7 @@ void DarkHttpd::Connection::redirect(const char *format, ...) {
   endHeader();
 }
 
-void DarkHttpd::Connection::redirect_https() {
+void Connection::redirect_https() {
   /* work out path of file being requested */
   AutoString url(urldecode(url));
 
@@ -1507,7 +1385,7 @@ void DarkHttpd::Connection::redirect_https() {
 /* Parse an HTTP request like "GET /urlGoes/here HTTP/1.1" to get the method (GET), the
  * url (/), the referer (if given) and the user-agent (if given).
  */
-bool DarkHttpd::Connection::parse_request() {
+bool Connection::parse_request() {
   /* parse method */
   StringView scanner = theRequest;
   auto methodToken = scanner.cutToken(' ');
@@ -1630,7 +1508,7 @@ class HtmlDirLister {
   //apbuf was used in one place and is very mundane code. This server is not particularly swift as it is so we drop this in favor of trusting libc and the OS to be good enough at this very frequenly used feature of an OS.
 
   /* Escape < > & ' " into HTML entities. */
-  static void append_escaped(DarkHttpd::Fd dst, const char *src) {
+  static void append_escaped(Fd dst, const char *src) {
     while (auto c = *src++) {
       switch (c) {
         case '<':
@@ -1658,7 +1536,7 @@ public:
   /* Encode string to be an RFC3986-compliant URL part.
    * Contributed by nf.
    */
-  static void htmlencode(DarkHttpd::Fd reply_fd, char *src) {
+  static void htmlencode(Fd reply_fd, char *src) {
     static const char hex[] = "0123456789ABCDEF";
 
     while (char c = *src++) {
@@ -1711,7 +1589,7 @@ public:
         }
       }
 
-      static int sortOnName( dlent &a,  dlent &b) {
+      static int sortOnName(dlent &a, dlent &b) {
         return strcmp(a.name, b.name);
       }
 
@@ -1832,7 +1710,7 @@ public:
 
 
 /* Process a GET/HEAD request. */
-void DarkHttpd::Connection::process_get() {
+void Connection::process_get() {
   char lastmod[DATE_LEN];
 
   /* work out path of file being requested */
@@ -1975,7 +1853,7 @@ void DarkHttpd::Connection::process_get() {
 }
 
 /* Process a request: build the header and reply, advance state. */
-void DarkHttpd::Connection::process_request() {
+void Connection::process_request() {
   service.fyi.num_requests++;
 
   if (!parse_request()) {
@@ -2001,7 +1879,7 @@ void DarkHttpd::Connection::process_request() {
 }
 
 /* Receiving request. */
-void DarkHttpd::Connection::poll_recv_request() {
+void Connection::poll_recv_request() {
   // char buf[1 << 15]; //32k is excessive, refuse any request that is longer than a header+maximum filename + any options allowed with a '?' for processing a file (of which the only ones of interest are directory listing options).
   assert(state == RECV_REQUEST);
   ssize_t recvd = recv(socket, received.begin(), sizeof(theRequest) - received.length, 0);
@@ -2056,7 +1934,7 @@ void DarkHttpd::Connection::poll_recv_request() {
 }
 
 /* Sending header.  Assumes conn->header is not NULL. */
-void DarkHttpd::Connection::poll_send_header() {
+void Connection::poll_send_header() {
   ssize_t sent;
 
   assert(state == SEND_HEADER);
@@ -2164,7 +2042,7 @@ static ssize_t send_from_file(const int s, const int fd, off_t ofs, size_t size)
 }
 
 /* Sending reply. */
-void DarkHttpd::Connection::poll_send_reply() {
+void Connection::poll_send_reply() {
   ssize_t sent;
 
   assert(state == SEND_REPLY);
@@ -2211,17 +2089,17 @@ void DarkHttpd::Connection::poll_send_reply() {
   }
 }
 
-void DarkHttpd::Connection::generate_dir_listing(const char *path, const char *decoded_url) {
+void Connection::generate_dir_listing(const char *path, const char *decoded_url) {
   //preparing to have different listing generators, such as "system("ls") with '?'params fed to ls as its params.
   // DirLister htmlLinkGenerator(*this);
   // htmlLinkGenerator(path, decoded_url);
-  HtmlDirLister (*this)(path, decoded_url);
+  HtmlDirLister(*this)(path, decoded_url);
 }
 
 /* Main loop of the httpd - a select() and then delegation to accept
  * connections, handle receiving of requests, and sending of replies.
  */
-void DarkHttpd::httpd_poll() {
+void Server::httpd_poll() {
   bool bother_with_timeout = false;
 
   timeval timeout;
@@ -2251,6 +2129,7 @@ void DarkHttpd::httpd_poll() {
         /* do nothing, no connection should be left in this state */
         break;
 
+      //original code only listens to reads when not 'done' or 'sending'. Done should not be a state!
       case Connection::RECV_REQUEST:
         MAX_FD_SET(int(conn->socket), &recv_set);
         bother_with_timeout = true;
@@ -2429,7 +2308,7 @@ void DarkHttpd::Daemon::finish() {
 }
 #endif
 
-void DarkHttpd::change_root() {
+void Server::change_root() {
 #ifdef HAVE_NON_ROOT_CHROOT
   /* We run this even as root, which should never be a bad thing. */
   int arg = PROC_NO_NEW_PRIVS_ENABLE;
@@ -2452,7 +2331,7 @@ void DarkHttpd::change_root() {
 }
 
 /* Close all sockets and FILEs and exit. */
-void DarkHttpd::stop_running(int sig unused) {
+void Server::stop_running(int sig unused) {
   if (forSignals) {
     forSignals->running = false;
   }
@@ -2464,7 +2343,7 @@ void DarkHttpd::stop_running(int sig unused) {
 // }
 
 /* usage stats */
-void DarkHttpd::reportStats() const {
+void Server::reportStats() const {
   rusage r;
   getrusage(RUSAGE_SELF, &r);
   printf("CPU time used: %u.%02u user, %u.%02u system\n",
@@ -2476,7 +2355,7 @@ void DarkHttpd::reportStats() const {
   printf("Bytes: %llu in, %llu out\n", llu(fyi.total_in), llu(fyi.total_out));
 }
 
-void DarkHttpd::prepareToRun() {
+void Server::prepareToRun() {
   init_sockin();
 
   /* open logfile */
@@ -2535,7 +2414,7 @@ void DarkHttpd::prepareToRun() {
 #endif
 }
 
-void DarkHttpd::freeall() {
+void Server::freeall() {
   /* close and free connections */
   for (auto conn: connections) {
     connections.remove(conn);
@@ -2628,14 +2507,18 @@ void DarkHttpd::Daemon::PidFiler::create() {
  * user_input to avoid leaking the secret's length and contents through timing
  * information.
  */
-bool DarkHttpd::Authorizer::operator()(const char *user_input) {
+bool Server::Authorizer::operator()(StringView user_input) {
   if (!key) {
     return true;
   }
   const char *secret = key.pointer;
-  if (user_input == nullptr) {
+  if (!user_input.notTrivial()) {
     return false; //
   }
+  //Strip "Basic"
+  user_input.trimLeading(" \t");
+  auto shouldBeBasic = user_input.cutToken(' ');
+
   size_t i = 0;
   size_t j = 0;
   char out = 0;
@@ -2663,8 +2546,8 @@ bool DarkHttpd::Authorizer::operator()(const char *user_input) {
 }
 
 
-/* Execution starts here. */
-int DarkHttpd::main(int argc, char **argv) {
+/* Blocking invocation of server */
+int Server::main(int argc, char **argv) {
   int exitcode = 0;
   try {
     printf("%s, %s.\n", pkgname, copyright);
@@ -2695,7 +2578,7 @@ int DarkHttpd::main(int argc, char **argv) {
   if (logfile) {
     fclose(logfile); //guarantees we don't lose a final message.
   }
-  freeall(); //gratuitous, ending a process makes this moot, except for memory leak detector.
   reportStats();
+  freeall(); //gratuitous, ending a process makes this moot, except for memory leak detector.
   return exitcode;
 }

@@ -38,11 +38,14 @@
 #endif
 #endif
 
+#include <autostring.h>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include "checkFormatArgs.h"
 #include <cstdlib>
 #include <cstring>
+#include <fd.h>
 #include <fcntl.h>
 #include <forward_list>
 
@@ -59,85 +62,6 @@
 #ifndef NO_IPV6
 #define HAVE_INET6
 #endif
-
-// gizmo to get the compiler to check our printf args:
-#ifndef checkFargs
-#ifdef __GNUC__
-/* [->] borrowed from FreeBSD's src/sys/sys/cdefs.h,v 1.102.2.2.2.1 */
-#define checkFargs(fmtarg, firstvararg) \
-  __attribute__((__format__(__printf__, fmtarg, firstvararg)))
-/* [<-] */
-#else
-#define checkFargs(fmtarg, firstvararg)
-#endif
-#endif
-
-
-/** to help ensure timely frees.
- * Many people seem to not know that 'free' doesn't mind null pointers, it checks for them and does nothing so that we don't have to do that in a gazillion places.
- *
- * This frees what it has been given at constructor or by assignment when there is an assignment or a destruction. As such never assign to it from anything not malloc'd.
- */
-struct AutoString : StringView {
-  // char *operator[](size_t offset)  {
-  //   static char fakechar;
-  //   if (!pointer) {
-  //     return &fakechar;
-  //   }
-  //   return &pointer[offset];
-  // }
-
-
-  /**
-   * @param str to append to end after reallocating room for it
-   * @param len length of string if known, ~0 for unknown (default)
-   * @returns whether the append happened, won't if out of heap
-   */
-  bool cat(const char *str, size_t len = ~0);
-
-  /** construct around an allocated content. */
-  AutoString(char *pointer = nullptr, unsigned length = ~0) : StringView(pointer, length) {
-    if (pointer && length == ~0) {
-      this->length = strlen(pointer);
-    }
-  }
-
-  void Free() {
-    free(pointer);
-    // null fields in case someone tries to use this after it is deleted
-    pointer = nullptr;
-    length = 0;
-  }
-
-  ~AutoString() {
-    Free();
-  }
-
-  AutoString &operator=(AutoString &other);
-
-  AutoString &operator=(char *replacement);
-
-  AutoString &toUpper();
-
-  /** frees present content and mallocs @param amount bytes plus one for a null that it inserts. */
-  bool malloc(size_t amount);
-
-  AutoString(AutoString &&other) = delete;
-
-  AutoString(const StringView &view) : StringView{static_cast<char *>(::malloc(view.length + 1)), view.length} {
-    memcpy(pointer, view.begin(), view.length);
-    //todo: add terminating null
-  }
-
-  unsigned int ccatf(const char *format, ...) const {
-    va_list args;
-    va_start(args, format);
-    //todo: all uses are going to go away so we aren't going to drag out vsprintf since we have such a class extending this one.
-    // auto newlength=snprintf(pointer, length, format,args);
-    va_end(args);
-    return length;
-  }
-};
 
 
 /** add conveniences to an in6_addr **/
@@ -175,118 +99,12 @@ struct SockAddr6 : sockaddr_in6 {
 
 class DarkException;
 
-class DarkHttpd {
-  /** until we use the full signal set ability to pass our object we only allow one DarkHttpd per process.*/
-  static DarkHttpd *forSignals; // trusting BSS zero to clear this.
-
-public:
-  class Fd { // a minimal one compared to safely/posix
-  protected:
-    int fd = -1;
-    FILE *stream = nullptr;
-
-  public: //temporary during code construction, this is carelessly cached.
-    size_t length = 0;
-
-  public:
-    FILE *getStream() { //this "create at need"
-      if (fd == -1) {
-        return nullptr; //todo: or perhaps spew to stderr?? This will likely segv.
-      }
-      if (stream == nullptr) {
-        stream = fdopen(fd, "wb"); //using b as we must use network line endings, not the platform's idea of them
-      }
-      return stream;
-    }
-
-  public:
-    // ReSharper disable once CppNonExplicitConversionOperator
-    operator int() const {
-      return fd;
-    }
-
-    bool seemsOk() const {
-      return fd != -1;
-    }
-
-    int operator=(int newfd) { // NOLINT(*-unconventional-assign-operator)
-      fd = newfd;
-      //consider caching stream here, if fd is open.
-      return newfd;
-    }
-
-    bool operator==(int newfd) const {
-      return fd == newfd;
-    }
-
-    // ReSharper disable once CppNonExplicitConversionOperator
-    operator bool() const {
-      return fd != -1;
-    }
-
-    /** @returns whether close() thinks it worked , but we discard our fd value regardless of that */
-    bool close() {
-      if (seemsOk()) {
-        int fi = ::close(fd);
-        fd = -1;
-        return fi != -1;
-      }
-      return true; // already closed is same as just now successfully closed.
-    }
-
-    /** lose track of the fd regardless of the associated file's state. Most uses seem like bugs, leaks of OS file handles.*/
-    void forget() {
-      fd = -1;
-    }
-
-    /** @returns whether the fd is real and not stdin, stdout, or stderr */
-    bool isNotStd() const {
-      return fd > 2;
-    }
-
-    /** close this one if open, then make it attach to same file as fdother
-     * @returns whether the OS was happy with doing this.
-     */
-    bool duplicate(int fdother) const {
-      return dup2(fdother, fd) != -1; // makes fd point to same file as fdother
-    }
-
-    /** put this guy's file state into @param fdother . */
-    bool copyinto(int fdother) const {
-      return dup2(fd, fdother) != -1;
-    }
-
-    size_t vprintln(const char *format, va_list va);
-
-    size_t putln(const char *content);
-
-    void unlink() {
-      //todo:close if not closed
-      close();
-    }
-
-    off_t getLength() {
-      if (seemsOk()) {
-        struct stat filestat;
-        if (fstat(fd, &filestat) == 0) {
-          return length = filestat.st_size;
-        }
-      }
-      return -1;
-    }
-
-    Fd() = default;
-
-    // ReSharper disable once CppNonExplicitConvertingConstructor
-    Fd(int open) : fd(open) {}
-
-    size_t printf(const char *format, ...);
-  };
-
+namespace DarkHttpd {
+  class Server;
 
   struct Connection {
     Fd socket;
-    DarkHttpd &service;
+    Server &service;
 #ifdef HAVE_INET6
     in6_addr client;
 #else
@@ -301,21 +119,22 @@ public:
       DONE /* connection closed, need to remove from queue */
     } state = DONE; // DONE makes it harmless so it gets garbage-collected if it should, for some reason, fail to be correctly filled out.
 
-    static constexpr size_t RequestSizeLimit = 8192; //vastly more than is needed for most GET'ing, this would only be small for a PUT and we will stream around the buffer by parsing as the content arrives and recognizing the PUT and the header boundary soon enough to do that.
+    //the following should be a runtime or at least compile time option. This code doesn't support put or post so it does not receive arbitrarily large requests.
+    static constexpr size_t RequestSizeLimit = 1023; //vastly more than is needed for most GET'ing, this would only be small for a PUT and we will stream around the buffer by parsing as the content arrives and recognizing the PUT and the header boundary soon enough to do that.
     char theRequest[RequestSizeLimit];
     StringView received{theRequest, 0, 0}; //bytes in.
     StringView parsed{theRequest, 0, 0}; //the part of the request that has been parsed so far.
-    // AutoString request;
-    struct Header {
-      const char *const name;
-      StringView value;
 
-      void clear() {
-        value.length = 0;
-      }
-
-      Header(const char *name): name(name), value{nullptr} {}
-    };
+    // struct Header {
+    //   const char *const name;
+    //   StringView value;
+    //
+    //   void clear() {
+    //     value.length = 0;
+    //   }
+    //
+    //   Header(const char *name): name(name), value{nullptr} {}
+    // };
 
     /* request fields */
     enum HttpMethods {
@@ -325,7 +144,7 @@ public:
 
     StringView hostname; //this was missing in original server, that failed to do hostname checking that is nominally required by RFC7230
     StringView url; //sub_string(request)
-    char * urlParams;//pointer to url text that followed a '?'
+    char *urlParams; //pointer to url text that followed a '?', 980f is considering using those in directory listings to support formatting options and the use a shell to ls for the listing.
     StringView referer; //parse_field
     StringView user_agent; //parse_field
     StringView authorization; //parse_field
@@ -395,7 +214,7 @@ public:
 
     /* header + body = total, for logging */
   public:
-    Connection(DarkHttpd &parent, int fd); //only called via new in socket acceptor code.
+    Connection(Server &parent, int fd); //only called via new in socket acceptor code.
 
     void clear();
 
@@ -454,110 +273,162 @@ public:
     void generate_dir_listing(const char *path, const char *decoded_url);
   }; //end of connection child class
 
-  /** the entries will all be dynamically allocated */
-  std::forward_list<Connection *> connections;
+  class Server {
+    friend Connection;
+    /** until we use the full signal set ability to pass our object we only allow one DarkHttpd per process.*/
+    static Server *forSignals; //epoll will let us eliminate this, it adds a user pointer to the notification structure.
+    static void stop_running(int sig);
+
+    Fd sockin; /* socket to accept connections from */
+
+#ifdef HAVE_INET6
+    bool inet6 = false; /* whether the socket uses inet6 */
+#endif
+    /* Defaults can be overridden on the command-line */
+    const char *bindaddr = nullptr; //only assigned from cmdline
+    uint16_t bindport; /* or 80 if running as root */
+    int max_connections = -1; /* kern.ipc.somaxconn */
+
+    /** the entries will all be dynamically allocated */
+    std::forward_list<Connection *> connections;
+
+    bool accepting = true; /* set to 0 to stop accept()ing */
+    bool syslog_enabled = false;
 
 
-  void load_mime_map_file(const char *filename);
+    volatile bool running = false; /* signal handler sets this to false */
 
-  const char *url_content_type(const char *url);
+#define INVALID_UID ((uid_t) ~0)
+#define INVALID_GID ((gid_t) ~0)
 
-  const char *get_address_text(const void *addr) const;
+    uid_t drop_uid = INVALID_UID;
+    gid_t drop_gid = INVALID_GID;
 
-  void init_sockin();
+    void change_root();
 
-  void usage(const char *argv0);
+    void prepareToRun();
 
-  void httpd_poll();
+    void httpd_poll();
 
 
-  void freeall();
+    void reportStats() const;
 
-  bool parse_commandline(int argc, char *argv[]);
+    void freeall();
 
-  void accept_connection();
 
-  void log_connection(const Connection *conn);
+    void load_mime_map_file(const char *filename);
 
-  void prepareToRun();
+    void init_sockin();
 
-  void change_root();
+    void usage(const char *argv0);
+
+    bool parse_commandline(int argc, char *argv[]);
+
+    void accept_connection();
+
+    void log_connection(const Connection *conn);
+
+  protected: //things connection can use
+    const char *url_content_type(const char *url);
+
+    const char *get_address_text(const void *addr) const;
+
+#if DarklySupportDaemon
+    struct Daemon {
+      struct PipePair {
+        Fd fds[2];
+
+        int operator[](bool which) const {
+          return fds[which];
+        }
+
+        bool connect() const {
+          int punned[2] = {fds[0], fds[1]};
+          return pipe(punned) != -1;
+        }
+
+        void close();
+      } lifeline;
+
+      Fd fd_null;
+      /* [->] pidfile helpers, based on FreeBSD src/lib/libutil/pidfile.c,v 1.3
+       * Original was copyright (c) 2005 Pawel Jakub Dawidek <pjd@FreeBSD.org>
+       */
+      struct PidFiler : Fd {
+        char *file_name = nullptr; /* NULL = no pidfile */
+
+        void remove();
+
+        void Remove(const char *why);
+
+        int file_read();
+
+        void create();
+      } pid;
+
+      bool start();
+
+      void finish();
+    } d;
+#endif
 
 #define DATE_LEN 30 /* strlen("Fri, 28 Feb 2003 00:02:08 GMT")+1 */
 
-  // const char *generated_on(const char date[DATE_LEN]) const;
-
-public:
-  DarkHttpd(): mimeFileContent(nullptr), wwwroot{nullptr} {
-    forSignals = this;
-  }
-
-  static void stop_running(int sig);
-
-  void reportStats() const;
-
-  int main(int argc, char **argv);
-
-  /** time of latest event, in 3 formats. */
-  struct Now {
-  private:
-    time_t raw = 0;
+    // const char *generated_on(const char date[DATE_LEN]) const;
 
   public:
-    operator time_t() const {
-      return raw;
+    Server(): mimeFileContent(nullptr), wwwroot{nullptr} {
+      forSignals = this;
     }
 
-    time_t utc;
-    char image[DATE_LEN];
-
-    void refresh() {
-      raw = time(&utc); //twofer: both are set to the same value
-      //rfc11whatever format.
-      image[strftime(image, DATE_LEN, "%a, %d %b %Y %H:%M:%S GMT", gmtime(&utc))] = 0; // strftime returns number of chars it put into dest.
-    }
-  } now;
-
-private:
-#if DarklySupportDaemon
-  struct Daemon {
-    struct PipePair {
-      Fd fds[2];
-
-      int operator[](bool which) const {
-        return fds[which];
-      }
-
-      bool connect() const {
-        int punned[2] = {fds[0], fds[1]};
-        return pipe(punned) != -1;
-      }
-
-      void close();
-    } lifeline;
-
-    Fd fd_null;
-    /* [->] pidfile helpers, based on FreeBSD src/lib/libutil/pidfile.c,v 1.3
-     * Original was copyright (c) 2005 Pawel Jakub Dawidek <pjd@FreeBSD.org>
+    /* If a connection is idle for timeout_secs or more, it gets closed and
+     * removed from the connlist.
      */
-    struct PidFiler : Fd {
-      char *file_name = nullptr; /* NULL = no pidfile */
+    unsigned timeout_secs = 30;
+    const char *default_mimetype = nullptr;
+    /** file of mime mappings gets read into here.*/
+    AutoString mimeFileContent;
 
-      void remove();
 
-      void Remove(const char *why);
+    //todo: load only from file, not commandline. Might even drop feature. Alternative is a std::vector of headers rather than a blob.
+    std::vector<const char *> custom_hdrs; //parse_commandline concatenation of argv's with formatting. Should just record their indexes and generate on sending rather than cacheing here.
+    bool want_accf = false;
+    bool want_keepalive = true;
+    bool want_server_id = true;
+    StringView wwwroot; /* a path name */ //argv[1]  and even if we demonize it is still present
 
-      int file_read();
+    char *logfile_name = nullptr; /* NULL = no logging */
+    FILE *logfile = nullptr;
 
-      void create();
-    } pid;
 
-    bool start();
-
-    void finish();
-  } d;
+    bool want_chroot = false;
+#if DarklySupportDaemon
+    bool want_daemon = false;
 #endif
-  Fd sockin; /* socket to accept connections from */
+    const char *index_name = "index.html";
+    bool no_listing = false;
+
+    /** time of latest event, in 3 formats. */
+    struct Now {
+    private:
+      time_t raw = 0;
+
+    public:
+      operator time_t() const {
+        return raw;
+      }
+
+      time_t utc;
+      char image[DATE_LEN];
+
+      void refresh() {
+        raw = time(&utc); //twofer: both are set to the same value
+        //rfc11whatever format.
+        image[strftime(image, DATE_LEN, "%a, %d %b %Y %H:%M:%S GMT", gmtime(&utc))] = 0; // strftime returns number of chars it put into dest.
+      }
+    } now;
+
+  private:
 #if DarklySupportForwarding
   struct Forwarding {
     const char *all_url = nullptr;
@@ -597,75 +468,21 @@ private:
   } forward;
 #endif
 
-  /* If a connection is idle for timeout_secs or more, it gets closed and
-   * removed from the connlist.
-   */
-  unsigned timeout_secs = 30;
+  protected:
+    struct Authorizer {
+      AutoString key; /* NULL or "Basic base64_of_password" */ //base64 expansion of a cli arg.
+      bool operator()(StringView authorization);
+    } auth;
 
-  /* Time is cached in the event loop to avoid making an excessive number of
-   * gettimeofday() calls.
-   */
+    /** things that are interesting but don't affect operation */
+    struct Fyi {
+      uint64_t num_requests = 0;
+      uint64_t total_in = 0;
+      uint64_t total_out = 0;
+    } fyi;
+  public:
 
-  /* To prevent a malformed request from eating up too much memory, die once the
-   * request exceeds this many bytes:
-   */
-#define MAX_REQUEST_LENGTH 4000
+    int main(int argc, char **argv);
+  };
 
-  /* Defaults can be overridden on the command-line */
-  const char *bindaddr = nullptr; //only assigned from cmdline
-  uint16_t bindport; /* or 80 if running as root */
-  int max_connections = -1; /* kern.ipc.somaxconn */
-  const char *index_name = "index.html";
-  bool no_listing = false;
-
-#ifdef HAVE_INET6
-  bool inet6 = false; /* whether the socket uses inet6 */
-#endif
-  const char *default_mimetype = nullptr;
-  /** file of mime mappings gets read into here.*/
-  AutoString mimeFileContent;
-
-public: //while refactoring, about to eliminate all but one reference to it, via requiring CWD and serve from there, eventually load from file.
-  StringView wwwroot; /* a path name */ //argv[1]  and even if we demonize it is still present
-private:
-  char *logfile_name = nullptr; /* NULL = no logging */
-  FILE *logfile = nullptr;
-
-
-  bool want_chroot = false;
-  #if DarklySupportDaemon
-  bool want_daemon = false;
-#endif
-
-  bool want_accf = false;
-  bool want_keepalive = true;
-
-public: //bridge for directory lister.
-  bool want_server_id = true;
-
-private:
-  struct Authorizer {
-    AutoString key; /* NULL or "Basic base64_of_password" */ //base64 expansion of a cli arg.
-    bool operator()(const char *authorization);
-  } auth;
-
-  //todo: load only from file, not commandline. Might even drop feature. Alternative is a std::vector of headers rather than a blob.
-  std::vector<const char *> custom_hdrs; //parse_commandline concatenation of argv's with formatting. Should just record their indexes and generate on sending rather than cacheing here.
-
-  /** things that are interesting but don't affect operation */
-  struct Fyi {
-    uint64_t num_requests = 0;
-    uint64_t total_in = 0;
-    uint64_t total_out = 0;
-  } fyi;
-
-  bool accepting = true; /* set to 0 to stop accept()ing */
-  bool syslog_enabled = false;
-  volatile bool running = false; /* signal handler sets this to false */
-
-#define INVALID_UID ((uid_t) ~0)
-#define INVALID_GID ((gid_t) ~0)
-
-  uid_t drop_uid = INVALID_UID;
-  gid_t drop_gid = INVALID_GID;
 };

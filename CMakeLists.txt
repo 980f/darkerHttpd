@@ -8,6 +8,11 @@ add_executable(
   darkerHttpd.cpp
   stringview.cpp
   stringview.h
+  fd.cpp
+  fd.h
+  autostring.cpp
+  autostring.h
+  checkFormatArgs.h
 )
 
 set(safely_target darkerhttpd)
