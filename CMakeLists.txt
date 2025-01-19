@@ -6,6 +6,8 @@ add_executable(
   darkhttpd.cpp
   darkhttpd.h
   darkerHttpd.cpp
+  stringview.cpp
+  stringview.h
 )
 
 set(safely_target darkerhttpd)

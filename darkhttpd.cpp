@@ -23,14 +23,13 @@
  * PERFORMANCE OF THIS SOFTWARE.
  *
  * It has been heavily modified to make it a module that can be included in other programs.
- * todo: replace strduping the mimemap contents with loading and keeping the whole external mime list, malloc once instead of dozens of times.
- * todo: replace strduping string values extracted from the request, instead poke nulls and point into it => use StringView rather than null terminated strings, and write to file rather than string printf variants with all the reallcating.
  * todo: epoll instead of select. Grr,no epoll on FreeBSD or NetBSD so we will use ppoll instead.
 */
 
 #include "darkhttpd.h"
 
 #include <cheaptricks.h>
+#include <functional>
 #include <iostream>
 
 
@@ -134,10 +133,6 @@ public:
   }
 };
 
-/** The time formatting that we use in directory listings.
- * An example of the default is 2013-09-09 13:01, which should be compatible with xbmc/kodi. */
-static const char *const DIR_LIST_MTIME_FORMAT = "%Y-%m-%d %R";
-static const unsigned DIR_LIST_MTIME_SIZE = 16 + 1; /* How large the buffer will need to be. */
 
 /* This is for non-root chroot support on FreeBSD 14.0+ */
 /* Must set sysctl security.bsd.unprivileged_chroot=1 to allow this. */
@@ -379,167 +374,6 @@ static char *make_safe_url(char *const url) {
   *dst = '\0';
   return url;
 #undef ends
-}
-
-StringView::StringView(char *pointer, size_t length, size_t start): pointer{pointer},
-  length{length},
-  start{start} {
-  if (pointer && length == ~0) {
-    this->length = strlen(&pointer[start]);
-  }
-}
-
-StringView &StringView::operator=(char *str) {
-  pointer = str;
-  length = strlen(str);
-  start = 0;
-  return *this;
-}
-
-StringView StringView::subString(size_t start, size_t pastEnd) const {
-  //todo: argument checks, both must be less than length and their sum must be less than length.
-  if (start + pastEnd > length) {
-    return StringView(pointer + this->start + start, pastEnd - start);
-  }
-  return StringView(nullptr, 0, 0);
-}
-
-char *StringView::put(char *bigenough, bool honorNull) const {
-  if (bigenough) {
-    if (pointer) {
-      if (length) {
-        for (size_t count = 0; count < length; ++count) {
-          *bigenough++ = pointer[count];
-          if (honorNull && !pointer[count]) {
-            break;
-          }
-        }
-      }
-    }
-    //this needs to be conditional for when we insert this guy into a right-sized hole inside *bigenough=0;
-  }
-  return bigenough;
-}
-
-ssize_t StringView::lookBack(ssize_t searchpoint, char sought) const {
-  if (searchpoint > length) {
-    return -1; //Garbage in: act dumb.
-  }
-  while (--searchpoint >= 0) {
-    if (pointer[start + searchpoint] == sought) {
-      break;
-    }
-  }
-  return searchpoint;
-}
-
-ssize_t StringView::lookAhead(char sought) const {
-  size_t looker = 0;
-  do {
-    if (pointer[start + looker] == sought) {
-      return looker;
-    }
-  } while (++looker < length) ;
-  return -1;
-}
-
-void StringView::chop(size_t moveStart) {
-  if (moveStart > length) {
-    start = length;
-    length = 0;
-    return;
-  }
-  start += moveStart;
-  length -= moveStart;
-}
-
-StringView StringView::cutToken(char termchar) {
-  if (notTrivial()) {
-    auto cutpoint = lookAhead(termchar);
-    if (cutpoint == -1) {
-      //todo: what do we do?
-    } else {
-      StringView token = StringView(pointer + start, length - cutpoint - 1); //limit new view as much as possible, no looking back in front of it.
-      chop(token.length);
-      return token;
-    }
-  }
-  return StringView(nullptr);
-}
-
-void StringView::trimTrailing(const char *trailers) {
-  if (notTrivial()) {
-    while (length && strchr(trailers, pointer[start + length - 1])) {
-      --length;
-    }
-  }
-}
-
-void StringView::trimLeading(const char *trailers) {
-  if (notTrivial()) {
-    while (length && strchr(trailers, pointer[start])) {
-      ++start;
-      --length;
-    }
-  }
-}
-
-// keep for a little while, it was needed at one time
-// /** @returns nullptr if the line is blank or EOL or EOL comment char, else points to first char not a space nor a tab */
-// static const char *removeLeadingWhitespace(const char *text) {
-//   auto first = strspn(text, " \t\n\r");
-//
-//   while (auto c = text[first]) {
-//     switch (c) {
-//       case ' ':
-//       case '\t':
-//         continue;
-//       case 0: //text is all blanks or tabs, index is of the null terminator
-//       case '#': //EOL comment marker
-//       case '\r': //in case we pull these out of
-//       case '\n': // ... the whitespace string
-//         return nullptr;
-//       default:
-//         return &text[first];
-//     }
-//   }
-//   return nullptr;
-// }
-
-
-bool StringView::endsWith(const char *str, unsigned len) const {
-  if (len == ~0) {
-    len = strlen(str);
-  }
-  return length > len && memcmp(&pointer[length - len], str, len) == 0;
-}
-
-ssize_t StringView::findLast(const StringView &extension) const {
-  if (notTrivial() & extension.notTrivial()) { //without checking extension length we could seek starting one byte past our allocation, probably harmless but easier to preclude than to verify.
-    if (extension.length < length) {
-      auto given = pointer + length - extension.length;
-
-      given = strrchr(given, ' '); //todo: allow tabs
-      if (given) {
-        if (strncmp(extension.begin(), given, extension.length) == 0) {
-          return given - begin();
-        }
-      }
-    }
-  }
-  return -1;
-}
-
-long long int StringView::cutNumber() {
-  char *start = begin();
-  char *end;
-  auto number = strtoll(start, &end, 10);
-  if (end == start) {
-    //nothing was there, no number was parsed
-    return 0;
-  }
-  chop(end - start);
-  return number;
 }
 
 bool AutoString::cat(const char *str, size_t len) {
@@ -1097,8 +931,10 @@ bool DarkHttpd::parse_commandline(int argc, char *argv[]) {
       logfile_name = argv[i];
     } else if (strcmp(argv[i], "--chroot") == 0) {
       want_chroot = true;
+#if DarklySupportDaemon
     } else if (strcmp(argv[i], "--daemon") == 0) {
       want_daemon = true;
+#endif
     } else if (strcmp(argv[i], "--index") == 0) {
       if (++i >= argc) {
         errx(1, "missing filename after --index");
@@ -1146,17 +982,20 @@ bool DarkHttpd::parse_commandline(int argc, char *argv[]) {
         errx(1, "no such gid: `%s'", argv[i]);
       }
       drop_gid = g->gr_gid;
+#if DarklySupportDaemon
     } else if (strcmp(argv[i], "--pidfile") == 0) {
       if (++i >= argc) {
         errx(1, "missing filename after --pidfile");
       }
       d.pid.file_name = argv[i];
+#endif
     } else if (strcmp(argv[i], "--no-keepalive") == 0) {
       want_keepalive = false;
     } else if (strcmp(argv[i], "--accf") == 0) {
       want_accf = true;
     } else if (strcmp(argv[i], "--syslog") == 0) {
       syslog_enabled = true;
+#if DarklySupportForwarding
     } else if (strcmp(argv[i], "--forward") == 0) {
       if (++i >= argc) {
         errx(1, "missing host after --forward");
@@ -1172,6 +1011,9 @@ bool DarkHttpd::parse_commandline(int argc, char *argv[]) {
         errx(1, "missing url after --forward-all");
       }
       forward.all_url = argv[i];
+    } else if (strcmp(argv[i], "--forward-https") == 0) {
+      forward.to_https = true;
+#endif
     } else if (strcmp(argv[i], "--no-server-id") == 0) {
       want_server_id = false;
     } else if (strcmp(argv[i], "--timeout") == 0) {
@@ -1186,8 +1028,6 @@ bool DarkHttpd::parse_commandline(int argc, char *argv[]) {
 
       AutoString key = reinterpret_cast<char *>(base64_encode(argv[i]));
       xasprintf(auth.key, "Basic %s", key.pointer);
-    } else if (strcmp(argv[i], "--forward-https") == 0) {
-      forward.to_https = true;
     } else if (strcmp(argv[i], "--header") == 0) {
       if (++i >= argc) {
         errx(1, "missing argument after --header");
@@ -1686,6 +1526,13 @@ bool DarkHttpd::Connection::parse_request() {
   if (!url) {
     return false;
   }
+
+  /* strip out query params */
+  urlParams = url.find('?');
+  if (urlParams != nullptr) {
+    *urlParams++ = '\0'; //modifies url!
+  }
+
   auto proto = scanner.cutToken('\n');
   proto.trimTrailing(" \t\r\n");
   //todo: check for http.1.
@@ -1752,73 +1599,9 @@ static bool file_exists(const char *path) {
   return stat(path, &filestat) == -1 && errno == ENOENT ? false : true;
 }
 
-class DirLister {
+class HtmlDirLister {
   DarkHttpd::Connection &conn;
 
-  static int dlent_cmp(const void *a, const void *b) {
-    return strcmp((*static_cast<const dlent *const *>(a))->name, (*static_cast<const dlent *const *>(b))->name);
-  }
-
-  struct dlent {
-    char *name; /* The name/path of the entry.                 */
-    int is_dir; /* If the entry is a directory and not a file. */
-    off_t size; /* The size of the entry, in bytes.            */
-    timespec mtime; /* When the file was last modified.            */
-  };
-
-  /* Make sorted list of files in a directory.  Returns number of entries, or -1
-   * if error occurs.
-   */
-  static ssize_t make_sorted_dirlist(const char *path, dlent ***output) {
-    DIR *dir;
-    dirent *ent;
-    size_t entries = 0;
-    size_t pool = 128;
-
-    dir = opendir(path);
-    if (dir == nullptr) {
-      return -1;
-    }
-
-    AutoString currname(static_cast<char *>(xmalloc(strlen(path) + MAXNAMLEN + 1)));
-    dlent **list = static_cast<struct dlent **>(xmalloc(sizeof(struct dlent *) * pool));
-
-    /* construct list */
-    while ((ent = readdir(dir)) != nullptr) {
-      struct stat s;
-
-      if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
-        continue; /* skip "." and ".." */
-      }
-      assert(strlen(ent->d_name) <= MAXNAMLEN);
-      sprintf(currname, "%s%s", path, ent->d_name);
-      if (stat(currname, &s) == -1) {
-        continue; /* skip un-stat-able files */
-      }
-      if (entries == pool) {
-        pool *= 2;
-        list = static_cast<dlent **>(xrealloc(list, sizeof(dlent *) * pool));
-      }
-      list[entries] = static_cast<dlent *>(xmalloc(sizeof(dlent)));
-      list[entries]->name = xstrdup(ent->d_name);
-      list[entries]->is_dir = S_ISDIR(s.st_mode);
-      list[entries]->size = s.st_size;
-      list[entries]->mtime = s.st_mtim;
-      entries++;
-    }
-    closedir(dir);
-    qsort(list, entries, sizeof(dlent *), dlent_cmp);
-    *output = list;
-    return (ssize_t) entries;
-  }
-
-  /* Cleanly deallocate a sorted list of directory files. */
-  static void cleanup_sorted_dirlist(dlent **list, const ssize_t size) {
-    for (ssize_t i = 0; i < size; i++) {
-      free(list[i]->name);
-      free(list[i]);
-    }
-  }
 
   /* Is this an unreserved character according to
  * https://tools.ietf.org/html/rfc3986#section-2.3
@@ -1887,16 +1670,108 @@ public:
     }
   }
 
-  DirLister(DarkHttpd::Connection &conn) : conn{conn} {}
+  /** manage lifetime of libc directory lister, can live outside this namespace */
+  struct DIRwrapper {
+    DIR *raw;
+    const char *path = nullptr;
+
+    ~DIRwrapper() {
+      closedir(raw);
+    }
+
+    bool operator ()(const char *path) {
+      raw = opendir(path);
+      return raw != nullptr;
+    }
+
+    dirent *next() {
+      return readdir(raw);
+    }
+
+    void foreach(std::function<void(dirent *, const char *)> body) {
+      while (auto entry = next()) {
+        body(entry, path);
+      }
+    }
+  };
+
+  /* listing mechanism, a reworking of what stat returns for a name */
+  class DirectoryListing {
+    struct dlent {
+      char *name = nullptr; /* The name/path of the entry.                 */
+      bool is_dir = false; /* If the entry is a directory and not a file. */
+      size_t size = 0; /* The size of the entry, in bytes.            */
+      timespec mtime; /* When the file was last modified.            */
+      bool nameIsMalloced;
+      dlent(bool dynamicName): mtime{0, 0}, nameIsMalloced{dynamicName} {}
+
+      ~dlent() {
+        if (nameIsMalloced) {
+          free(name);
+        }
+      }
+
+      static int sortOnName( dlent &a,  dlent &b) {
+        return strcmp(a.name, b.name);
+      }
+
+      //can add other standard sorts here.
+    };
+
+  public:
+    std::forward_list<dlent> ing; //this name will make sense at point of use.
+
+    /* Make sorted list of files in a directory.  Returns number of entries, or -1
+     * if error occurs.
+     */
+    ~DirectoryListing() {
+      ing.clear();
+    }
+
+  public:
+    bool operator()(const char *path) {
+      DIRwrapper dir;
+      if (!dir(path)) {
+        return false;
+      }
+
+      dir.foreach([&](dirent *ent, const char *dirpath) {
+        char currname[FILENAME_MAX]; //workspace for extended path.
+
+        struct stat s;
+
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
+          return; /* skip "." and ".." */
+        }
+        assert(strlen(ent->d_name) <= MAXNAMLEN);
+        sprintf(currname, "%s%s", dirpath, ent->d_name); //we only call this routine if we saw a '/' at the end of the path, so we don't add one here.
+        if (stat(currname, &s) == -1) {
+          return; /* skip un-stat-able files */
+        }
+        auto repack = new dlent(true); //true: we will malloc'ing name.
+        repack->name = xstrdup(ent->d_name);
+        repack->is_dir = S_ISDIR(s.st_mode);
+        repack->size = s.st_size;
+        repack->mtime = s.st_mtim;
+        ing.push_front(repack);
+      });
+
+      ing.sort(dlent::sortOnName);
+      return true;
+    }
+  };
+
+  HtmlDirLister(DarkHttpd::Connection &conn) : conn{conn} {}
 
   //was generate_dir_listing
   void operator()(const char *path, const char *decoded_url) {
     // size_t maxlen = 3; /* There has to be ".." */
-
-    dlent **list;
-    ssize_t listsize = make_sorted_dirlist(path, &list);
-    if (listsize == -1) {
-      /* opendir() failed */
+    /** The time formatting that we use in directory listings.
+     * An example of the default is 2013-09-09 13:01, which should be compatible with xbmc/kodi. */
+    static const char *const DIR_LIST_MTIME_FORMAT = "%Y-%m-%d %R";
+    static const unsigned DIR_LIST_MTIME_SIZE = 16 + 1; /* How large the buffer will need to be. */
+    DirectoryListing list;
+    if (!list(path)) { /* then an opendir() failed */
       if (errno == EACCES) {
         conn.default_reply(403, "Forbidden", "You don't have permission to access this URL.");
       } else if (errno == ENOENT) {
@@ -1918,38 +1793,33 @@ public:
     append_escaped(conn.reply.content_fd, decoded_url);
     conn.reply.content_fd.printf("</h1>\n<table border=\"0\">\n");
 
-    for (int i = 0; i < listsize; i++) {
+    for (auto entry: list.ing) {
       conn.reply.content_fd.printf("<tr>td><a href=\"");
 
-      htmlencode(conn.reply.content_fd, list[i]->name);
+      htmlencode(conn.reply.content_fd, entry.name);
 
-      if (list[i]->is_dir) {
+      if (entry.is_dir) {
         conn.reply.content_fd.printf("/");
       }
       conn.reply.content_fd.printf("\">");
-      append_escaped(conn.reply.content_fd, list[i]->name);
-      if (list[i]->is_dir) {
+      append_escaped(conn.reply.content_fd, entry.name);
+      if (entry.is_dir) {
         conn.reply.content_fd.printf("/");
       }
       conn.reply.content_fd.printf("</a></td><td>");
 
       char mtimeImage[DIR_LIST_MTIME_SIZE];
       tm tm;
-      localtime_r(&list[i]->mtime.tv_sec, &tm); //local computer time? should be option between that and a tz from header.
+      localtime_r(&entry.mtime.tv_sec, &tm); //local computer time? should be option between that and a tz from header.
       strftime(mtimeImage, sizeof mtimeImage, DIR_LIST_MTIME_FORMAT, &tm);
 
       conn.reply.content_fd.printf(mtimeImage);
       conn.reply.content_fd.printf("</td><td>");
-      if (!list[i]->is_dir) {
-        conn.reply.content_fd.printf("%10llu", llu(list[i]->size));
+      if (!entry.is_dir) {
+        conn.reply.content_fd.printf("%10llu", llu(entry.size));
       }
       conn.reply.content_fd.printf("</td></tr>\n");
     }
-
-    cleanup_sorted_dirlist(list, listsize);
-    free(list);
-
-
     conn.reply.content_fd.printf("</table>\n");
     conn.addFooter();
     conn.endReply();
@@ -1965,12 +1835,6 @@ public:
 void DarkHttpd::Connection::process_get() {
   char lastmod[DATE_LEN];
 
-  /* strip out query params */
-  auto end = strchr(url, '?');
-  if (end != nullptr) {
-    *end = '\0'; //modifies url!
-  }
-
   /* work out path of file being requested */
   AutoString decoded_url(urldecode(url));
 
@@ -1979,12 +1843,13 @@ void DarkHttpd::Connection::process_get() {
     default_reply(400, "Bad Request", "You requested an invalid URL.");
     return;
   }
-  auto forward_to=service.forward(hostname);
+#if DarklySupportForwarding
+  auto forward_to = service.forward(hostname);
   if (forward_to) {
     redirect("%s%s", forward_to, decoded_url.pointer);
     return;
   }
-
+#endif
   const char *mimetype(nullptr);
   AutoString target;
 
@@ -2015,8 +1880,7 @@ void DarkHttpd::Connection::process_get() {
   /* open file */
   reply.content_fd = open(target, O_RDONLY | O_NONBLOCK);
 
-  if (!reply.content_fd) {
-    /* open() failed */
+  if (!reply.content_fd) { /* open() failed */
     if (errno == EACCES) {
       default_reply(403, "Forbidden", "You don't have permission to access this URL.");
     } else if (errno == ENOENT) {
@@ -2349,8 +2213,9 @@ void DarkHttpd::Connection::poll_send_reply() {
 
 void DarkHttpd::Connection::generate_dir_listing(const char *path, const char *decoded_url) {
   //preparing to have different listing generators, such as "system("ls") with '?'params fed to ls as its params.
-  DirLister htmlLinkGenerator(*this);
-  htmlLinkGenerator(path, decoded_url);
+  // DirLister htmlLinkGenerator(*this);
+  // htmlLinkGenerator(path, decoded_url);
+  HtmlDirLister (*this)(path, decoded_url);
 }
 
 /* Main loop of the httpd - a select() and then delegation to accept
@@ -2489,6 +2354,7 @@ void DarkHttpd::httpd_poll() {
   }
 }
 
+#if DarklySupportDaemon
 /* Daemonize helpers. */
 #define PATH_DEVNULL "/dev/null"
 
@@ -2561,7 +2427,7 @@ void DarkHttpd::Daemon::finish() {
     close(fd_null);
   }
 }
-
+#endif
 
 void DarkHttpd::change_root() {
 #ifdef HAVE_NON_ROOT_CHROOT
@@ -2622,11 +2488,11 @@ void DarkHttpd::prepareToRun() {
       err(1, "opening logfile: fopen(\"%s\")", logfile_name);
     }
   }
-
+#if DarklySupportDaemon
   if (want_daemon) {
     d.start();
   }
-
+#endif
   /* signals */
   if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
     err(1, "signal(ignore SIGPIPE)");
@@ -2660,12 +2526,13 @@ void DarkHttpd::prepareToRun() {
     }
     printf("set uid to %d\n", (int) drop_uid);
   }
-
-  d.pid.create();//creating even if it isn't actually going to be used as a soliton enforcer for the daemon state.
+#if DarklySupportDaemon
+  d.pid.create(); //creating even if it isn't actually going to be used as a soliton enforcer for the daemon state.
 
   if (want_daemon) {
     d.finish();
   }
+#endif
 }
 
 void DarkHttpd::freeall() {
@@ -2674,45 +2541,12 @@ void DarkHttpd::freeall() {
     connections.remove(conn);
     conn->clear();
   }
-
+#if DarklySupportForwarding
   forward.map.clear(); // todo; free contents first! Must establish that all were malloc'd
+#endif
 }
 
-/* Execution starts here. */
-int DarkHttpd::main(int argc, char **argv) {
-  int exitcode = 0;
-  try {
-    printf("%s, %s.\n", pkgname, copyright);
-    parse_commandline(argc, argv);
-    /* NB: parse_commandline() might override parts of the extension map by
-     * parsing a user-specified file. THat is why we use insert_or_add when parsing it into the map.
-     */
-    prepareToRun();
-    /* main loop */
-    running = true;
-    while (running) {
-      httpd_poll();
-    }
-    /* clean exit */
-    xclose(sockin);
-    if (d.pid.file_name) {
-      d.pid.remove(); //systemd can be configured to do this for you.
-    }
-  } catch (DarkException ex) {
-    printf("Exit %d attempted, ending polling loop in __FUNCTION__", ex.returncode);
-    exitcode = ex.returncode;
-  } catch (...) {
-    printf("Unknown exception, probably from the std lib");
-    exitcode = EXIT_FAILURE;
-  }
-  if (logfile) {
-    fclose(logfile); //guarantees we don't lose a final message.
-  }
-  freeall(); //gratuitous, ending a process makes this moot, except for memory leak detector.
-  reportStats();
-  return exitcode;
-}
-
+#if DarklySupportDaemon
 void DarkHttpd::Daemon::PipePair::close() {
   if (!fds[0].close()) {
     warn("close read end of lifeline in child");
@@ -2788,7 +2622,7 @@ void DarkHttpd::Daemon::PidFiler::create() {
     Remove("pwrite() failed");
   }
 }
-
+#endif
 
 /* Returns 1 if passwords are equal, runtime is proportional to the length of
  * user_input to avoid leaking the secret's length and contents through timing
@@ -2826,4 +2660,42 @@ bool DarkHttpd::Authorizer::operator()(const char *user_input) {
   out |= (i != j); /* Secret was shorter. */
   out |= (secret[j] != 0); /* Secret was longer; j is not the end. */
   return out == 0;
+}
+
+
+/* Execution starts here. */
+int DarkHttpd::main(int argc, char **argv) {
+  int exitcode = 0;
+  try {
+    printf("%s, %s.\n", pkgname, copyright);
+    parse_commandline(argc, argv);
+    /* NB: parse_commandline() might override parts of the extension map by
+     * parsing a user-specified file. THat is why we use insert_or_add when parsing it into the map.
+     */
+    prepareToRun();
+    /* main loop */
+    running = true;
+    while (running) {
+      httpd_poll();
+    }
+    /* clean exit */
+    xclose(sockin);
+#if DarklySupportDaemon
+    if (d.pid.file_name) {
+      d.pid.remove(); //systemd can be configured to do this for you.
+    }
+#endif
+  } catch (DarkException ex) {
+    printf("Exit %d attempted, ending polling loop in __FUNCTION__", ex.returncode);
+    exitcode = ex.returncode;
+  } catch (...) {
+    printf("Unknown exception, probably from the std lib");
+    exitcode = EXIT_FAILURE;
+  }
+  if (logfile) {
+    fclose(logfile); //guarantees we don't lose a final message.
+  }
+  freeall(); //gratuitous, ending a process makes this moot, except for memory leak detector.
+  reportStats();
+  return exitcode;
 }
