@@ -74,7 +74,7 @@ static ssize_t send_from_file(int s, int fd, off_t ofs, size_t size);
 #include <sys/types.h>
 #include <syslog.h>
 #include <unistd.h>
-
+#include <wait.h>
 using namespace DarkHttpd;
 
 class DebugLog {
@@ -2128,7 +2128,7 @@ void Server::httpd_poll() {
 /* Daemonize helpers. */
 #define PATH_DEVNULL "/dev/null"
 
-bool DarkHttpd::Daemon::start() {
+bool Server::Daemon::start() {
   if (!lifeline.connect()) {
     err(1, "pipe(lifeline)");
     return false;
@@ -2172,7 +2172,7 @@ bool DarkHttpd::Daemon::start() {
   return true;
 }
 
-void DarkHttpd::Daemon::finish() {
+void Server::Daemon::finish() {
   if (!fd_null) {
     return; /* didn't daemonize_start() so we're not daemonizing */
   }
@@ -2317,7 +2317,7 @@ void Server::freeall() {
 }
 
 #if DarklySupportDaemon
-void DarkHttpd::Daemon::PipePair::close() {
+void Server::Daemon::PipePair::close() {
   if (!fds[0].close()) {
     warn("close read end of lifeline in child");
   }
@@ -2326,7 +2326,7 @@ void DarkHttpd::Daemon::PipePair::close() {
   }
 }
 
-void DarkHttpd::Daemon::PidFiler::remove() {
+void Server::Daemon::PidFiler::remove() {
   if (::unlink(file_name) == -1) {
     err(1, "unlink(pidfile) failed");
   }
@@ -2335,14 +2335,14 @@ void DarkHttpd::Daemon::PidFiler::remove() {
   close();
 }
 
-void DarkHttpd::Daemon::PidFiler::Remove(const char *why) {
+void Server::Daemon::PidFiler::Remove(const char *why) {
   int error = errno;
   remove();
   errno = error;
   err(1, why); //ignore format-security warning, it can't work here.
 }
 
-int DarkHttpd::Daemon::PidFiler::file_read() {
+int Server::Daemon::PidFiler::file_read() {
   char buf[16];
   long long pid;
 
@@ -2366,7 +2366,7 @@ int DarkHttpd::Daemon::PidFiler::file_read() {
 
 #define PIDFILE_MODE 0600
 
-void DarkHttpd::Daemon::PidFiler::create() {
+void Server::Daemon::PidFiler::create() {
   if (!file_name) {
     return;
   }

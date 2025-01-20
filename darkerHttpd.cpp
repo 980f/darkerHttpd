@@ -2,7 +2,20 @@
 // Created by andyh on 1/13/25.
 // Copyright (c) 2025 Andy Heilveil, (github/980f). All rights reserved.
 */
+
+
 #include "darkhttpd.h"
+
+#if DarklySupportForwarding
+#warning "forwarding is supported"
+#endif
+#if DarklySupportDaemon
+#warning "daemon operation is supported, including PID file generation"
+#endif
+#if DarklySuppportAcceptanceFilters
+#warning "acceptance filters feature is enable"
+#endif
+
 
 int main(int argc, char *argv[]) {
   DarkHttpd::Server server;

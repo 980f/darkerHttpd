@@ -53,6 +53,7 @@
 #include <forward_list>
 
 #include <locale>
+#include <map>
 
 #include <netinet/in.h>
 #include <sys/stat.h>
@@ -361,6 +362,7 @@ namespace DarkHttpd {
 
       void finish();
     } d;
+    bool want_daemon = false;
 #endif
 
 
@@ -396,9 +398,7 @@ namespace DarkHttpd {
 
 
     bool want_chroot = false;
-#if DarklySupportDaemon
-    bool want_daemon = false;
-#endif
+
     const char *index_name = "index.html";
     bool no_listing = false;
 

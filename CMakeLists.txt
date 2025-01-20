@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(darkerHttpd VERSION 1.0 LANGUAGES C CXX)
 
+
 add_executable(
   darkerhttpd
   darkhttpd.cpp
@@ -16,6 +17,13 @@ add_executable(
   addr6.cpp
   addr6.h
 )
+
+target_compile_definitions(darkerhttpd PUBLIC
+  DarklySupportForwarding=1
+  DarklySupportDaemon=1
+  DarklySuppportAcceptanceFilters=1
+)
+
 
 set(safely_target darkerhttpd)
 
