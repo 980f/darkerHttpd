@@ -38,24 +38,23 @@
 #endif
 #endif
 
-#include <autostring.h>
+#include "stringview.h"
+#include "autostring.h"
+#include "checkFormatArgs.h"
+#include "fd.h"
+
+#include <vector>
+#include <cstring>
+#include <fcntl.h>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
-#include "checkFormatArgs.h"
-#include <cstdlib>
-#include <cstring>
-#include <fd.h>
-#include <fcntl.h>
+#include <unistd.h>
 #include <forward_list>
 
 #include <locale>
-#include <map>
-#include "stringview.h"
 
 #include <netinet/in.h>
-#include <unistd.h>
-#include <vector>
 #include <sys/stat.h>
 
 /** build options */
@@ -63,11 +62,17 @@
 #define HAVE_INET6
 #endif
 
+//FreeBSD can support acceptance filters, #define DarklySupportAcceptanceFilter 0 to disable compilation regardless of platform.
+#ifndef DarklySupportAcceptanceFilter
+#ifdef __FreeBSD__
+#define DarklySupportAcceptanceFilter true
+#endif
+#endif
 
 class DarkException;
 
 namespace DarkHttpd {
-  class Server;
+  class Server; //server and connection know about each other. Can subclass the shared part and have a clean hierarchy.
 
   struct Connection {
     Fd socket;
@@ -156,26 +161,44 @@ namespace DarkHttpd {
     bool conn_closed = true; //move this back to connection itself.
 
     struct Replier {
-      bool header_only = false;
       int http_code = 0;
+      bool header_only = false;
 
-      size_t header_sent = 0;
-      bool header_dont_free = false;
-      //with all replies and headers being done through files the only reply type info relevent is "header_only"
+      struct Block {
+        Fd fd;
+        bool dont_free = false;
+        size_t sent = 0;
+        void recycle(bool andForget) {
+          dont_free = false;
+          sent = 0;
+          if (andForget){//suspicious fragment in the original, abandoned an open file descriptor, potentially leaking it.
+            fd.forget(); // but it might be still open ?!
+          }
+          fd.close();
+        }
 
-      Fd header_fd;
-      bool dont_free = false;
-      Fd content_fd;
+        void clear() {
+          if (!dont_free) {
+            fd.unlink();
+          }
+        }
+      } ;
 
+      Block header;
+
+      Block content;
+      // Fd content_fd;
+      // bool dont_free = false;
+      // off_t sent = 0;
+      //
       off_t start = 0;
       off_t file_length = 0;
-      off_t sent = 0;
       off_t total_sent = 0;
 
       void recycle();
 
       off_t getContentLength() {
-        return content_fd.getLength();
+        return content.fd.getLength();
       }
     } reply;
 
@@ -183,6 +206,7 @@ namespace DarkHttpd {
   public:
     Connection(Server &parent, int fd); //only called via new in socket acceptor code.
 
+    /* forget the past request, and everything parsed from it or generated for it */
     void clear();
 
     void recycle();
@@ -339,7 +363,7 @@ namespace DarkHttpd {
     } d;
 #endif
 
-#define DATE_LEN 30 /* strlen("Fri, 28 Feb 2003 00:02:08 GMT")+1 */
+
 
     // const char *generated_on(const char date[DATE_LEN]) const;
 
@@ -359,7 +383,10 @@ namespace DarkHttpd {
 
     //todo: load only from file, not commandline. Might even drop feature. Alternative is a std::vector of headers rather than a blob.
     std::vector<const char *> custom_hdrs; //parse_commandline concatenation of argv's with formatting. Should just record their indexes and generate on sending rather than cacheing here.
-    bool want_accf = false;
+#if DarklySupportAcceptanceFilter
+    bool want_accf = false;//FreeBSD accept filter (replace runtime bitch with compile time flag and complaint when parsing command line/file
+#endif
+
     bool want_keepalive = true;
     bool want_server_id = true;
     StringView wwwroot; /* a path name */ //argv[1]  and even if we demonize it is still present
@@ -377,6 +404,7 @@ namespace DarkHttpd {
 
     /** time of latest event, in 3 formats. */
     struct Now {
+      #define DATE_LEN 30 /* strlen("Fri, 28 Feb 2003 00:02:08 GMT")+1 */
     private:
       time_t raw = 0;
 

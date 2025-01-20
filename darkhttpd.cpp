@@ -519,21 +519,20 @@ void Server::init_sockin() {
     err(1, "listen()");
   }
 
+  #if DarklySupportAcceptanceFilter
   /* enable acceptfilter (this is only available on FreeBSD) */
   if (want_accf) {
-#if defined(__FreeBSD__)
+
     struct accept_filter_arg filt = {"httpready", ""};
     if (setsockopt(sockin, SOL_SOCKET, SO_ACCEPTFILTER, &filt, sizeof(filt)) == -1) {
       fprintf(stderr, "cannot enable acceptfilter: %s\n", strerror(errno));
     } else {
       printf("enabled acceptfilter\n");
     }
-#else
-    printf("this platform doesn't support acceptfilter\n");
-#endif
   }
-}
 
+#endif
+}
 void Server::usage(const char *argv0) {
   printf("usage:\t%s /path/to/wwwroot [flags]\n\n", argv0);
   printf("flags:\t--port number (default: %u, or 80 if running as root)\n"
@@ -547,12 +546,14 @@ void Server::usage(const char *argv0) {
   printf("\t--ipv6\n"
     "\t\tListen on IPv6 address.\n\n");
 #endif
+#if DarklySupportDaemon
   printf("\t--daemon (default: don't daemonize)\n"
     "\t\tDetach from the controlling terminal and run in the background.\n\n");
   printf("\t--pidfile filename (default: no pidfile)\n"
     "\t\tWrite PID to the specified file. Note that if you are\n"
     "\t\tusing --chroot, then the pidfile must be relative to,\n"
     "\t\tand inside the wwwroot.\n\n");
+#endif
   printf("\t--maxconn number (default: system maximum)\n"
     "\t\tSpecifies how many concurrent connections to accept.\n\n");
   printf("\t--log filename (default: stdout)\n"
@@ -572,12 +573,13 @@ void Server::usage(const char *argv0) {
     "\t\tDrops privileges to given uid:gid after initialization.\n\n");
   printf("\t--chroot (default: don't chroot)\n"
     "\t\tLocks server into wwwroot directory for added security.\n\n");
-#ifdef __FreeBSD__
+#ifdef DarklySupportAcceptanceFilter
   printf("\t--accf (default: don't use acceptfilter)\n"
          "\t\tUse acceptfilter. Needs the accf_http kernel module loaded.\n\n");
 #endif
   printf("\t--no-keepalive\n"
     "\t\tDisables HTTP Keep-Alive functionality.\n\n");
+#if DarklySupportForwarding
   printf("\t--forward host url (default: don't forward)\n"
     "\t\tWeb forward (301 redirect).\n"
     "\t\tRequests to the host are redirected to the corresponding url.\n"
@@ -590,6 +592,7 @@ void Server::usage(const char *argv0) {
     "\t\tIf the client requested HTTP, forward to HTTPS.\n"
     "\t\tThis is useful if darkhttpd is behind a reverse proxy\n"
     "\t\tthat supports SSL.\n\n");
+#endif
   printf("\t--no-server-id\n"
     "\t\tDon't identify the server type in headers\n"
     "\t\tor directory listings.\n\n");
@@ -749,8 +752,10 @@ bool Server::parse_commandline(int argc, char *argv[]) {
 #endif
     } else if (strcmp(argv[i], "--no-keepalive") == 0) {
       want_keepalive = false;
+#if   DarklySupportAcceptanceFilter
     } else if (strcmp(argv[i], "--accf") == 0) {
       want_accf = true;
+#endif
     } else if (strcmp(argv[i], "--syslog") == 0) {
       syslog_enabled = true;
 #if DarklySupportForwarding
@@ -852,7 +857,6 @@ void Server::accept_connection() {
   {
     *reinterpret_cast<in_addr_t *>(&conn->client) = addrin.sin_addr.s_addr;
   }
-
 
   debug("accepted connection from %s:%u (fd %d)\n", inet_ntoa(addrin.sin_addr), ntohs(addrin.sin_port), int(conn->socket));
 
@@ -1003,15 +1007,14 @@ int Connection::ByteRange::parse(StringView rangeline) {
 }
 
 void Connection::Replier::recycle() {
-  header_dont_free = false;
-  dont_free = false;
-  header_sent = 0;
   header_only = false;
   http_code = 0;
-  content_fd.forget(); // but it might be still open ?!
+
+  header.recycle(false);
+  content.recycle(true);
+
   start = 0;
   file_length = 0;
-  sent = 0;
   total_sent = 0;
 }
 
@@ -1023,19 +1026,15 @@ Connection::Connection(Server &parent, int fd): socket(fd), service(parent), the
 }
 
 void Connection::clear() {
-  received.length = 0; //forget the past request,
+  received.length = 0;
   parsed.length = 0;
   method = NotMine;
   url = nullptr;
   referer = nullptr;
   user_agent = nullptr;
   authorization = nullptr;
-  if (!reply.header_dont_free) {
-    reply.header_fd.unlink();
-  }
-  if (!reply.dont_free) {
-    reply.content_fd.unlink();
-  }
+  reply.header.clear();
+  reply.content.clear();
 }
 
 /* Recycle a finished connection for HTTP/1.1 Keep-Alive. */
@@ -1112,39 +1111,39 @@ void Connection::startHeader(const int errcode, const char *errtext) {
   if (!errtext) {
     errtext = ""; //don't want a "(null)" comment which is what some printf's do for a null pointer.
   }
-  reply.header_fd.printf("HTTP/1.1 %d %s\r\n", reply.http_code, errtext);
+  reply.header.fd.printf("HTTP/1.1 %d %s\r\n", reply.http_code, errtext);
 }
 
 void Connection::catDate() {
-  reply.header_fd.printf("Date: %s\r\n", service.now.image);
+  reply.header.fd.printf("Date: %s\r\n", service.now.image);
 }
 
 void Connection::catServer() {
   if (service.want_server_id) {
-    reply.header_fd.printf("Server: %s\r\n", pkgname);
+    reply.header.fd.printf("Server: %s\r\n", pkgname);
   }
 }
 
 void Connection::catFixed(const char *fixedText) {
-  reply.header_fd.printf(fixedText);
+  reply.header.fd.printf(fixedText);
 }
 
 void Connection::catKeepAlive() {
   if (conn_closed) {
-    reply.header_fd.printf("Connection: close\r\n");
+    reply.header.fd.printf("Connection: close\r\n");
   } else {
-    reply.header_fd.printf("Keep-Alive: timeout=%d\r\n", service.timeout_secs);
+    reply.header.fd.printf("Keep-Alive: timeout=%d\r\n", service.timeout_secs);
   }
 }
 
 void Connection::catCustomHeaders() {
   for (auto custom_Hdr: service.custom_hdrs) {
-    reply.header_fd.printf("%s\r\n", custom_Hdr);
+    reply.header.fd.printf("%s\r\n", custom_Hdr);
   }
 }
 
 void Connection::catContentLength(off_t off) {
-  reply.header_fd.printf("Content-Length: %llu\r\n", llu(off));
+  reply.header.fd.printf("Content-Length: %llu\r\n", llu(off));
 }
 
 void Connection::startCommonHeader(int errcode, const char *errtext, off_t contentLenght = ~0UL) {
@@ -1162,31 +1161,31 @@ void Connection::startCommonHeader(int errcode, const char *errtext, off_t conte
 
 void Connection::catAuth() {
   if (service.auth.key.notTrivial()) {
-    reply.header_fd.printf("WWW-Authenticate: Basic realm=\"User Visible Realm\"\r\n");
+    reply.header.fd.printf("WWW-Authenticate: Basic realm=\"User Visible Realm\"\r\n");
   }
 }
 
 void Connection::catGeneratedOn(bool toReply) {
   if (service.want_server_id) {
-    (toReply ? reply.content_fd : reply.header_fd).printf("Generated by %s on %s\n", pkgname, service.now.image);
+    (toReply ? reply.content.fd : reply.header.fd).printf("Generated by %s on %s\n", pkgname, service.now.image);
   }
 }
 
 
 void Connection::endHeader() {
-  reply.header_fd.printf("\r\n");
+  reply.header.fd.printf("\r\n");
 }
 
 void Connection::startReply(int errcode, const char *errtext) {
   //todo: open a tempfile
 
-  reply.content_fd.printf("<!DOCTYPE html><html><head><title>%d %s</title></head><body>\n" "<h1>%s</h1>\n", errcode, errtext, errtext);
+  reply.content.fd.printf("<!DOCTYPE html><html><head><title>%d %s</title></head><body>\n" "<h1>%s</h1>\n", errcode, errtext, errtext);
 }
 
 void Connection::addFooter() {
-  reply.content_fd.putln("<hr>");
+  reply.content.fd.putln("<hr>");
   catGeneratedOn(true);
-  reply.content_fd.putln("</body></html>");
+  reply.content.fd.putln("</body></html>");
 }
 
 /* A default reply for any (erroneous) occasion. */
@@ -1194,7 +1193,7 @@ void Connection::default_reply(const int errcode, const char *errname, const cha
   startReply(errcode, errname);
   va_list va;
   va_start(va, format);
-  reply.content_fd.vprintln(format, va);
+  reply.content.fd.vprintln(format, va);
   va_end(va);
   addFooter();
   endReply();
@@ -1211,40 +1210,40 @@ void Connection::default_reply(const int errcode, const char *errname, const cha
 }
 
 void Connection::endReply() {
-  reply.content_fd.close();
+  reply.content.fd.close();
   reply.getContentLength();
 }
 
 void Connection::redirect(const char *proto, const char *hostname, const char *url) {
   startReply(reply.http_code = 301, "Moved Permanently");
-  reply.content_fd.printf("Moved to: <a href=\"");
+  reply.content.fd.printf("Moved to: <a href=\"");
   if (proto) {
-    reply.content_fd.printf(proto);
+    reply.content.fd.printf(proto);
   }
   if (hostname) {
-    reply.content_fd.printf(hostname);
+    reply.content.fd.printf(hostname);
   }
-  reply.content_fd.printf(url);
+  reply.content.fd.printf(url);
 
-  reply.content_fd.printf("\">");
+  reply.content.fd.printf("\">");
   if (proto) {
-    reply.content_fd.printf(proto);
+    reply.content.fd.printf(proto);
   }
   if (hostname) {
-    reply.content_fd.printf(hostname);
+    reply.content.fd.printf(hostname);
   }
-  reply.content_fd.printf(url);
+  reply.content.fd.printf(url);
 
-  reply.content_fd.printf("</a>\n");
+  reply.content.fd.printf("</a>\n");
   addFooter();
   endReply();
 
   startHeader(301, "Moved Permanently");
-  reply.content_fd.printf("Date: %s\r\n", service.now.image);
+  reply.content.fd.printf("Date: %s\r\n", service.now.image);
   catServer();
 
   /* "Accept-Ranges: bytes\r\n" - not relevant here */
-  reply.content_fd.printf("Location: %s%s\r\n", hostname, url);
+  reply.content.fd.printf("Location: %s%s\r\n", hostname, url);
   catKeepAlive();
   catCustomHeaders();
   catContentLength(reply.file_length);
@@ -1554,43 +1553,43 @@ public:
 
     conn.startReply(200, "OK");
 
-    conn.reply.content_fd.printf("<!DOCTYPE html>\n<html>\n<head>\n<title>");
-    append_escaped(conn.reply.content_fd, decoded_url);
-    conn.reply.content_fd.printf(
+    conn.reply.content.fd.printf("<!DOCTYPE html>\n<html>\n<head>\n<title>");
+    append_escaped(conn.reply.content.fd, decoded_url);
+    conn.reply.content.fd.printf(
       "</title>\n"
       "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
       "</head>\n<body>\n<h1>");
-    append_escaped(conn.reply.content_fd, decoded_url);
-    conn.reply.content_fd.printf("</h1>\n<table border=\"0\">\n");
+    append_escaped(conn.reply.content.fd, decoded_url);
+    conn.reply.content.fd.printf("</h1>\n<table border=\"0\">\n");
 
     for (auto entry: list.ing) {
-      conn.reply.content_fd.printf("<tr>td><a href=\"");
+      conn.reply.content.fd.printf("<tr>td><a href=\"");
 
-      htmlencode(conn.reply.content_fd, entry->name);
+      htmlencode(conn.reply.content.fd, entry->name);
 
       if (entry->is_dir) {
-        conn.reply.content_fd.printf("/");
+        conn.reply.content.fd.printf("/");
       }
-      conn.reply.content_fd.printf("\">");
-      append_escaped(conn.reply.content_fd, entry->name);
+      conn.reply.content.fd.printf("\">");
+      append_escaped(conn.reply.content.fd, entry->name);
       if (entry->is_dir) {
-        conn.reply.content_fd.printf("/");
+        conn.reply.content.fd.printf("/");
       }
-      conn.reply.content_fd.printf("</a></td><td>");
+      conn.reply.content.fd.printf("</a></td><td>");
 
       char mtimeImage[DIR_LIST_MTIME_SIZE];
       tm tm;
       localtime_r(&entry->mtime.tv_sec, &tm); //local computer time? should be option between that and a tz from header.
       strftime(mtimeImage, sizeof mtimeImage, DIR_LIST_MTIME_FORMAT, &tm);
 
-      conn.reply.content_fd.printf(mtimeImage);
-      conn.reply.content_fd.printf("</td><td>");
+      conn.reply.content.fd.printf(mtimeImage);
+      conn.reply.content.fd.printf("</td><td>");
       if (!entry->is_dir) {
-        conn.reply.content_fd.printf("%10llu", llu(entry->size));
+        conn.reply.content.fd.printf("%10llu", llu(entry->size));
       }
-      conn.reply.content_fd.printf("</td></tr>\n");
+      conn.reply.content.fd.printf("</td></tr>\n");
     }
-    conn.reply.content_fd.printf("</table>\n");
+    conn.reply.content.fd.printf("</table>\n");
     conn.addFooter();
     conn.endReply();
 
@@ -1648,9 +1647,9 @@ void Connection::process_get() {
   debug("url=\"%s\", target=\"%s\", content-type=\"%s\"\n", url.pointer, target.pointer, mimetype);
 
   /* open file */
-  reply.content_fd = open(target, O_RDONLY | O_NONBLOCK);
+  reply.content.fd = open(target, O_RDONLY | O_NONBLOCK);
 
-  if (!reply.content_fd) { /* open() failed */
+  if (!reply.content.fd) { /* open() failed */
     if (errno == EACCES) {
       default_reply(403, "Forbidden", "You don't have permission to access this URL.");
     } else if (errno == ENOENT) {
@@ -1662,7 +1661,7 @@ void Connection::process_get() {
   }
 
   struct stat filestat;
-  if (fstat(reply.content_fd, &filestat) == -1) {
+  if (fstat(reply.content.fd, &filestat) == -1) {
     default_reply(500, "Internal Server Error", "fstat() failed: %s.", strerror(errno));
     return;
   }
@@ -1731,7 +1730,7 @@ void Connection::process_get() {
     reply.file_length = to - from + 1;
 
     startCommonHeader(206, "Partial Content", reply.file_length);
-    reply.header_fd.printf("Content-Range: bytes %llu-%llu/%llu\r\n", llu(from), llu(to), llu(filestat.st_size));
+    reply.header.fd.printf("Content-Range: bytes %llu-%llu/%llu\r\n", llu(from), llu(to), llu(filestat.st_size));
 
     debug("sending %llu-%llu/%llu\n", llu(from), llu(to), llu(filestat.st_size));
   } else {
@@ -1739,8 +1738,8 @@ void Connection::process_get() {
     reply.file_length = filestat.st_size;
     startCommonHeader(200, "OK", reply.file_length);
   }
-  reply.header_fd.printf("Content-Type: %s\r\n", mimetype);
-  reply.header_fd.printf("Last-Modified: %s\r\n", lastmod);
+  reply.header.fd.printf("Content-Type: %s\r\n", mimetype);
+  reply.header.fd.printf("Last-Modified: %s\r\n", lastmod);
   endHeader();
 }
 
@@ -1832,7 +1831,7 @@ void Connection::poll_send_header() {
   assert(state == SEND_HEADER);
   // assert(header.length == strlen(header));
 
-  sent = send_from_file(socket, reply.header_fd, 0, reply.header_fd.getLength());
+  sent = send_from_file(socket, reply.header.fd, 0, reply.header.fd.getLength());
   last_active = service.now;
   debug("poll_send_header(%d) sent %d bytes\n", int(socket), (int) sent);
 
@@ -1850,12 +1849,12 @@ void Connection::poll_send_header() {
     return;
   }
   assert(sent > 0);
-  reply.header_sent += sent;
+  reply.header.sent += sent;
   reply.total_sent += sent;
   service.fyi.total_out += sent;
 
   /* check if we're done sending header */
-  if (reply.header_sent == reply.header_fd.length) {
+  if (reply.header.sent == reply.header.fd.length) {
     if (reply.header_only) {
       state = DONE;
     } else {
@@ -1942,19 +1941,19 @@ void Connection::poll_send_reply() {
 
   /* off_t of file_length can be wider than size_t, avoid overflow in send_len */
   const size_t max_size_t = ~0;
-  off_t send_len = reply.file_length - reply.sent;
+  off_t send_len = reply.file_length - reply.content.sent;
   if (send_len > max_size_t) {
     send_len = max_size_t;
   }
   errno = 0;
-  assert(reply.file_length >= reply.sent);
-  sent = send_from_file(socket, reply.content_fd, reply.start + reply.sent, send_len);
+  assert(reply.file_length >= reply.content.sent);
+  sent = send_from_file(socket, reply.content.fd, reply.start + reply.content.sent, send_len);
   if (sent < 1) {
     debug("send_from_file returned %lld (errno=%d %s)\n", llu(sent), errno, strerror(errno));
   }
 
   last_active = service.now;
-  debug("poll_send_reply(%d) sent %ld: %llu+[%llu-%llu] of %llu\n", int(socket), sent, llu(reply.start), llu(reply.sent), llu(reply.sent + sent - 1), llu(reply.file_length));
+  debug("poll_send_reply(%d) sent %ld: %llu+[%llu-%llu] of %llu\n", int(socket), sent, llu(reply.start), llu(reply.content.sent), llu(reply.content.sent + sent - 1), llu(reply.file_length));
 
   /* handle any errors (-1) or closure (0) in send() */
   if (sent < 1) {
@@ -1971,12 +1970,12 @@ void Connection::poll_send_reply() {
     state = DONE;
     return;
   }
-  reply.sent += sent;
+  reply.content.sent += sent;
   reply.total_sent += sent;
   service.fyi.total_out += sent;
 
   /* check if we're done sending */
-  if (reply.sent == reply.file_length) {
+  if (reply.content.sent == reply.file_length) {
     state = DONE;
   }
 }
