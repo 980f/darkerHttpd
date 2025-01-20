@@ -13,6 +13,8 @@ add_executable(
   autostring.cpp
   autostring.h
   checkFormatArgs.h
+  addr6.cpp
+  addr6.h
 )
 
 set(safely_target darkerhttpd)

@@ -64,39 +64,6 @@
 #endif
 
 
-/** add conveniences to an in6_addr **/
-struct Inaddr6 : in6_addr {
-  Inaddr6 &clear();
-
-  Inaddr6() : in6_addr() {
-    clear();
-  }
-
-  bool isUnspecified() const;
-
-  bool isLoopback() const;
-
-  bool isLinkLocal() const;
-
-  bool isSiteLocal() const;
-
-  /** @returns whether this ipv6 address is a mapped ipv4*/
-  bool wasIpv4() const;
-
-  bool isV4compatible() const;
-
-  bool operator ==(const Inaddr6 &other) const;
-
-  bool isMulticast() const;
-};
-
-struct SockAddr6 : sockaddr_in6 {
-  Inaddr6 &addr6;
-  SockAddr6() : addr6(*reinterpret_cast<Inaddr6 *>(&sin6_addr)) {}
-
-  bool presentationToNetwork(const char *bindaddr);
-};
-
 class DarkException;
 
 namespace DarkHttpd {
@@ -252,7 +219,7 @@ namespace DarkHttpd {
 
     void endReply();
 
-    void redirect(const char *format, ...) checkFargs(2, 3);
+    void redirect(const char *protocol, const char *hostpart, const char *uripart);
 
     void redirect_https();
 

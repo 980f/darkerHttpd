@@ -28,6 +28,7 @@
 
 #include "darkhttpd.h"
 
+#include <addr6.h>
 #include <cheaptricks.h>
 #include <fd.h>
 #include <functional>
@@ -62,7 +63,7 @@ static ssize_t send_from_file(int s, int fd, off_t ofs, size_t size);
 #include <dirent.h>
 #include <fcntl.h>
 #include <grp.h>
-#include <netinet/in.h>
+// #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pwd.h>
 #include <sys/param.h>
@@ -71,7 +72,6 @@ static ssize_t send_from_file(int s, int fd, off_t ofs, size_t size);
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <syslog.h>
 #include <unistd.h>
 
@@ -238,18 +238,6 @@ static void *xmalloc(const size_t size) {
   return ptr;
 }
 
-/* strdup() that dies if it can't allocate.
- * Implement this ourselves since regular strdup() isn't C89.
- */
-static char *xstrdup(const char *src) {
-  size_t len = strlen(src) + 1;
-  char *dest = static_cast<char *>(xmalloc(len));
-  if (dest != nullptr) {
-    memcpy(dest, src, len);
-  }
-  return dest;
-}
-
 /* Make the specified socket non-blocking. */
 static void nonblock_socket(const int sock) {
   int flags = fcntl(sock, F_GETFL);
@@ -264,117 +252,71 @@ static void nonblock_socket(const int sock) {
 }
 
 /* Resolve /./ and /../ in a URL, in-place.
- * Returns NULL if the URL is invalid/unsafe, or the original buffer if
- * successful.
+ * @returns whether @param URL is legit.
+ * presently bizarre sequences of slashes and dots are treated as if all the slashes preceded all of the dots. That needs to be fixed to handle ../../ and the like.
  */
-static char *make_safe_url(char *const url) {
-  char *src = url;
-#define ends(c) ((c) == '/' || (c) == '\0')
-
+static bool make_safe_url(char *url) {
   /* URLs not starting with a slash are illegal. */
-  if (*src != '/') {
-    return nullptr;
-  }
-
-  /* Fast case: skip until first double-slash or dot-dir. */
-  for (; *src; ++src) {
-    if (*src == '/') {
-      if (src[1] == '/') {
-        break;
-      } else if (src[1] == '.') {
-        if (ends(src[2])) {
-          break;
-        } else if (src[2] == '.' && ends(src[3])) {
-          break;
-        }
-      }
-    }
-  }
-
-  /* Copy to dst, while collapsing multi-slashes and handling dot-dirs. */
-  char *dst = src;
-  while (*src) {
-    if (*src != '/') {
-      *dst++ = *src++;
-    } else if (*++src == '/') {
-      //drop second of doubled slash.
-    } else if (*src != '.') {
-      *dst++ = '/';
-    } else if (ends(src[1])) {
-      /* Ignore single-dot component. */
-      ++src;
-    } else if (src[1] == '.' && ends(src[2])) {
-      /* Double-dot component. */
-      src += 2;
-      if (dst == url) {
-        return nullptr; /* Illegal URL */
-      } else {
-        /* Backtrack to previous slash. */
-        while (*--dst != '/' && dst > url);
-      }
-    } else {
-      *dst++ = '/';
-    }
-  }
-
-  if (dst == url) {
-    ++dst;
-  }
-  *dst = '\0';
-  return url;
-#undef ends
-}
-
-Inaddr6 &Inaddr6::clear() {
-  for (auto index = 4; index-- > 0;) { //gcc converts this to a memset.
-    __in6_u.__u6_addr32[index] = 0;
-  }
-  return *this;
-}
-
-bool Inaddr6::isUnspecified() const {
-  return __in6_u.__u6_addr32[0] == 0 && __in6_u.__u6_addr32[1] == 0 && __in6_u.__u6_addr32[2] == 0 && __in6_u.__u6_addr32[3] == 0;
-}
-
-bool Inaddr6::isLoopback() const {
-  return __in6_u.__u6_addr32[0] == 0 && __in6_u.__u6_addr32[1] == 0 && __in6_u.__u6_addr32[2] == 0 && __in6_u.__u6_addr32[3] == htonl(1);
-}
-
-bool Inaddr6::isLinkLocal() const {
-  return __in6_u.__u6_addr32[0] & htonl(0xffc00000) == htonl(0xfe800000);
-}
-
-bool Inaddr6::isSiteLocal() const {
-  return __in6_u.__u6_addr32[0] & htonl(0xffc00000) == htonl(0xfec00000);
-}
-
-bool Inaddr6::wasIpv4() const {
-  return __in6_u.__u6_addr32[0] == 0 && __in6_u.__u6_addr32[1] == 0 && __in6_u.__u6_addr32[2] == htonl(0xffff);
-}
-
-bool Inaddr6::isV4compatible() const {
-  return __in6_u.__u6_addr32[0] == 0 && __in6_u.__u6_addr32[1] == 0 && __in6_u.__u6_addr32[2] == 0 && ntohl(__in6_u.__u6_addr32[3]) > 1;
-}
-
-bool Inaddr6::operator==(const Inaddr6 &other) const {
-  for (auto index = 4; index-- > 0;) {
-    if (__in6_u.__u6_addr32[index] != other.__in6_u.__u6_addr32[index]) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool Inaddr6::isMulticast() const {
-  return __in6_u.__u6_addr8[0] == 0xff;
-}
-
-bool SockAddr6::presentationToNetwork(const char *bindaddr) {
-  addr6.clear();
-  if (inet_pton(AF_INET6, bindaddr ? bindaddr : "::", &addr6) != 1) {
-    err(-1, "malformed --addr argument");
+  if (*url != '/') {
     return false;
   }
+
+  char *reader = url + 1; //drop the slash
+  char *writer = url;
+  // #define ends(c) ((c) == '/' || (c) == '\0')
+  unsigned priorSlash = 1; //the leading one
+  unsigned priorDot = 0;
+
+  /* Copy to dst, while collapsing multi-slashes and handling dot-dirs. */
+  // special cases /./  /../  /a../ /a./  /.../
+  while (char c = *reader++) {
+    if (c == '/') {
+      if (priorDot) {}
+      ++priorSlash;
+      continue; //action defered until we have seen something other than slash or dot
+    }
+    if (c == '.') {
+      ++priorDot;
+      continue;
+    }
+    //not a slash nor a dot so resolve those
+    switch (priorDot) {
+      case 1: //trailing dot
+        if (take(priorSlash)) {
+          *writer++ = '/'; //one slash, and dot disappears
+        }
+        priorDot = 0;
+        continue; //do tdisappears
+      case 2:
+        //todo: backup to slash prior to counted ones, and emit nothing
+        if (take(priorSlash)) {
+          while (writer > url) {
+            if (*writer == '/') {
+              priorDot = 0;
+              break;
+            }
+          }
+          if (priorDot) { //we exited the while by running off of the end
+            *url = 0; //kill it, kill it really hard
+            return false;
+          }
+        }
+      //tried to escape
+      default:
+        if (priorDot) {
+          *url = 0; //kill it, kill it really hard
+          return false;
+        }
+        break;
+    }
+    if (priorSlash) {
+      *writer++ = '/'; //one slash, and dot disappears
+      priorSlash = 0;
+      //but also emit the char
+    }
+    *writer++ = c;
+  }
+  *writer = 0;
   return true;
 }
 
@@ -428,7 +370,7 @@ void Server::load_mime_map_file(const char *filename) {
   if (fd > 0) {
     struct stat filestat;
     if (fstat(fd, &filestat) == 0) {
-      if (mimeFileContent.malloc(filestat.st_size)) {
+      if (mimeFileContent.malloc(filestat.st_size)) { //#freed in main()
         if (read(fd, mimeFileContent, filestat.st_size) == filestat.st_size) {
           //the malloc member put a null in so we should be ready to roll.
         } else {
@@ -1273,15 +1215,27 @@ void Connection::endReply() {
   reply.getContentLength();
 }
 
-void Connection::redirect(const char *format, ...) {
-  AutoString where;
-
-  va_list va;
-  va_start(va, format);
-
+void Connection::redirect(const char *proto, const char *hostname, const char *url) {
   startReply(reply.http_code = 301, "Moved Permanently");
-  reply.content_fd.printf("Moved to: <a href=\"%s\">%s</a>\n", where.pointer, where.pointer); /* where x 2 */
+  reply.content_fd.printf("Moved to: <a href=\"");
+  if (proto) {
+    reply.content_fd.printf(proto);
+  }
+  if (hostname) {
+    reply.content_fd.printf(hostname);
+  }
+  reply.content_fd.printf(url);
 
+  reply.content_fd.printf("\">");
+  if (proto) {
+    reply.content_fd.printf(proto);
+  }
+  if (hostname) {
+    reply.content_fd.printf(hostname);
+  }
+  reply.content_fd.printf(url);
+
+  reply.content_fd.printf("</a>\n");
   addFooter();
   endReply();
 
@@ -1290,7 +1244,7 @@ void Connection::redirect(const char *format, ...) {
   catServer();
 
   /* "Accept-Ranges: bytes\r\n" - not relevant here */
-  reply.content_fd.printf("Location: %s\r\n", where.pointer);
+  reply.content_fd.printf("Location: %s%s\r\n", hostname, url);
   catKeepAlive();
   catCustomHeaders();
   catContentLength(reply.file_length);
@@ -1304,7 +1258,7 @@ void Connection::redirect_https() {
   AutoString url(urldecode(url));
 
   /* make sure it's safe */
-  if (make_safe_url(url) == nullptr) {
+  if (!make_safe_url(url)) {
     default_reply(400, "Bad Request", "You requested an invalid URL.");
     return;
   }
@@ -1314,7 +1268,7 @@ void Connection::redirect_https() {
     default_reply(400, "Bad Request", "Missing 'Host' header.");
     return;
   }
-  redirect("https://%s%s", hostname.pointer, url.pointer);
+  redirect("https://", hostname, url);
 }
 
 
@@ -1513,9 +1467,9 @@ public:
   class DirectoryListing {
     struct dlent {
       char *name = nullptr; /* The strdup'd name/path of the entry.       */
-      bool is_dir = false;  /* If the entry is a directory and not a file. */
-      size_t size = 0;      /* The size of the entry, in bytes.            */
-      timespec mtime;       /* When the file was last modified.            */
+      bool is_dir = false; /* If the entry is a directory and not a file. */
+      size_t size = 0; /* The size of the entry, in bytes.            */
+      timespec mtime; /* When the file was last modified.            */
 
       dlent(): mtime{0, 0} {}
 
@@ -1526,6 +1480,7 @@ public:
       static int sortOnName(dlent *a, dlent *b) {
         return strcmp(a->name, b->name);
       }
+
       //can add other standard sorts here.
     };
 
@@ -1536,14 +1491,14 @@ public:
      * if error occurs.
      */
     ~DirectoryListing() {
-      for (auto dlent : ing) {
+      for (auto dlent: ing) {
         free(dlent);
       }
       ing.clear();
     }
 
   public:
-    bool operator()(const char *path,bool    includeHidden) {
+    bool operator()(const char *path, bool includeHidden) {
       DIRwrapper dir;
       if (!dir(path)) {
         return false;
@@ -1552,13 +1507,13 @@ public:
       dir.foreach([&](dirent *ent, const char *dirpath) {
         char currname[FILENAME_MAX]; //workspace for extended path.
 
-        if (ent->d_name[0]=='.') {
-          if (ent->d_name[1] == 0 || ent->d_name[1] == '.'  || !includeHidden) {
+        if (ent->d_name[0] == '.') {
+          if (ent->d_name[1] == 0 || ent->d_name[1] == '.' || !includeHidden) {
             return; /* skip "." and ".." */
           }
         }
 
-        snprintf(currname, sizeof currname,"%s%s", dirpath, ent->d_name); //we only call this routine if we saw a '/' at the end of the path, so we don't add one here.
+        snprintf(currname, sizeof currname, "%s%s", dirpath, ent->d_name); //we only call this routine if we saw a '/' at the end of the path, so we don't add one here.
         struct stat s;
         if (stat(currname, &s) == -1) {
           return; /* skip un-stat-able files */
@@ -1586,7 +1541,7 @@ public:
     static const char *const DIR_LIST_MTIME_FORMAT = "%Y-%m-%d %R";
     static const unsigned DIR_LIST_MTIME_SIZE = 16 + 1; /* How large the buffer will need to be. */
     DirectoryListing list;
-    if (!list(path,true)) { /* then an opendir() failed */
+    if (!list(path, true)) { /* then an opendir() failed */
       if (errno == EACCES) {
         conn.default_reply(403, "Forbidden", "You don't have permission to access this URL.");
       } else if (errno == ENOENT) {
@@ -1654,7 +1609,7 @@ void Connection::process_get() {
   AutoString decoded_url(urldecode(url));
 
   /* make sure it's safe */
-  if (make_safe_url(decoded_url) == nullptr) {
+  if (!make_safe_url(decoded_url)) {
     default_reply(400, "Bad Request", "You requested an invalid URL.");
     return;
   }
@@ -1714,8 +1669,8 @@ void Connection::process_get() {
   reply.file_length = filestat.st_size;
 
   /* make sure it's a regular file */
-  if ((S_ISDIR(filestat.st_mode))) {
-    redirect("%s/", url.pointer);
+  if (S_ISDIR(filestat.st_mode)) {
+    redirect(nullptr, "/", url);
     return;
   } else if (!S_ISREG(filestat.st_mode)) {
     default_reply(403, "Forbidden", "Not a regular file.");
