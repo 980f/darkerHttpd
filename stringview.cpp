@@ -191,3 +191,12 @@ char *StringView::find(char c) {
   }
   return nullptr;
 }
+
+void StringView::truncateAt(char *writer) {
+  if (writer>=begin()) {
+    if (writer<end()) {
+      *writer = '\0';
+      length = writer-begin();
+    }
+  }
+}

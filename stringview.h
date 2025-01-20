@@ -110,4 +110,6 @@ struct StringView {
 
   /** @wraps strchr */
   char * find(char c);
+
+  void truncateAt(char * writer);
 };

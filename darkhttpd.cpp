@@ -199,16 +199,17 @@ template<typename Integrish> auto llu(Integrish x) {
 /* err - prints "error: format: strerror(errno)" to stderr and exit()s with
  * the given code.
  */
-static void err(int code, const char *format, ...) checkFargs(2, 3);
+static bool err(int code, const char *format, ...) checkFargs(2, 3);
 
-static void err(int code, const char *format, ...) {
+static bool err(int code, const char *format, ...) {
   fprintf(stderr, "err[%d]: %s", code, code > 0 ? strerror(code) : "is not an errno.");
   va_list va;
   va_start(va, format);
 
   vfprintf(stderr, format, va);
   va_end(va);
-  throw DarkException(code);;
+  throw DarkException(code);
+  return false;
 }
 
 static void warn(const char *format, ...) checkFargs(1, 2);
@@ -255,21 +256,21 @@ static void nonblock_socket(const int sock) {
  * @returns whether @param URL is legit.
  * presently bizarre sequences of slashes and dots are treated as if all the slashes preceded all of the dots. That needs to be fixed to handle ../../ and the like.
  */
-static bool make_safe_url(char *url) {
+static bool make_safe_url(StringView url) {
   /* URLs not starting with a slash are illegal. */
   if (*url != '/') {
     return false;
   }
 
-  char *reader = url + 1; //drop the slash
-  char *writer = url;
+  char *reader = url.begin();
+  char *writer = reader;
   // #define ends(c) ((c) == '/' || (c) == '\0')
   unsigned priorSlash = 1; //the leading one
   unsigned priorDot = 0;
 
   /* Copy to dst, while collapsing multi-slashes and handling dot-dirs. */
   // special cases /./  /../  /a../ /a./  /.../
-  while (char c = *reader++) {
+  while (char c = *++reader) {
     if (c == '/') {
       if (priorDot) {}
       ++priorSlash;
@@ -316,7 +317,7 @@ static bool make_safe_url(char *url) {
     }
     *writer++ = c;
   }
-  *writer = 0;
+  url.truncateAt(writer);
   return true;
 }
 
@@ -519,7 +520,7 @@ void Server::init_sockin() {
     err(1, "listen()");
   }
 
-  #if DarklySupportAcceptanceFilter
+#if DarklySupportAcceptanceFilter
   /* enable acceptfilter (this is only available on FreeBSD) */
   if (want_accf) {
 
@@ -533,6 +534,7 @@ void Server::init_sockin() {
 
 #endif
 }
+
 void Server::usage(const char *argv0) {
   printf("usage:\t%s /path/to/wwwroot [flags]\n\n", argv0);
   printf("flags:\t--port number (default: %u, or 80 if running as root)\n"
@@ -589,8 +591,8 @@ void Server::usage(const char *argv0) {
     "\t\tWeb forward (301 redirect).\n"
     "\t\tAll requests are redirected to the corresponding url.\n\n");
   printf("\t--forward-https\n"
-    "\t\tIf the client requested HTTP, forward to HTTPS.\n"
-    "\t\tThis is useful if darkhttpd is behind a reverse proxy\n"
+    "\t\tIf the client requested HTTP, forward to HTTPS.\n" //there is no way to determine the protocol the user requested other than knowing that the typical inetd is only going to send one of the other to this guy and the person launching the program knows which.
+    "\t\tThis is useful if darkhttpd is behind a reverse proxy\n" //this should only be set if you know that all incoming traffic is http. The x-forward-proto request header is how a client can bypass the inetd with this support.
     "\t\tthat supports SSL.\n\n");
 #endif
   printf("\t--no-server-id\n"
@@ -604,8 +606,9 @@ void Server::usage(const char *argv0) {
     "\t\tEnable basic authentication. This is *INSECURE*: passwords\n"
     "\t\tare sent unencrypted over HTTP, plus the password is visible\n"
     "\t\tin ps(1) to other users on the system.\n\n");
-  printf("\t--header 'Header: Value'\n"
+  printf("\t--header \"Name: Value\"\n"
     "\t\tAdd a custom header to all responses.\n"
+    "\t\tNote that each must be quoted and have a colon and a single space after that.\n"
     "\t\tThis option can be specified multiple times, in which case\n"
     "\t\tthe headers are added in order of appearance.\n\n");
 #ifndef HAVE_INET6
@@ -615,201 +618,178 @@ void Server::usage(const char *argv0) {
 
 /* @returns whether string is strictly a number.  Set num to NULL if disinterested in its value.
  */
-static bool str_to_num(const char *str, long long *num) {
-  char *endptr;
-  long long n;
+// static long long str_to_num(const char *str, bool *fault) {
+//   char *endptr;
+//   long long n;
+//
+//   errno = 0;
+//   n = strtoll(str, &endptr, 10);
+//   if (fault) {
+//     *fault = (*endptr!=0) || (n == LLONG_MIN && errno == ERANGE) ||(n == LLONG_MAX && errno == ERANGE);
+//   }
+//   return n;
+// }
+//
+// /* @returns a valid number or dies.
+//  * @deprecated
+//  */
+// static long long xstr_to_num(const char *str) {
+//   long long ret=~0;//something likely to blow hard if the parse fails.
+//
+//   if (!str_to_num(str, &ret)) {
+//     err(-1, "number \"%s\" is invalid", str);
+//   }
+//   return ret;
+// }
 
-  errno = 0;
-  n = strtoll(str, &endptr, 10);
-  if (*endptr != 0) {
-    return false; //todo:1 check for KMG multiplier.
+class CliScanner {
+public:
+  CliScanner(int argc, char **argv) : argc{argc}, argv{argv} {}
+
+  bool stillHas(unsigned needed) {
+    return argi + needed < argc;
   }
-  if (n == LLONG_MIN && errno == ERANGE) {
-    return false;
+
+  char *operator()() {
+    return argv[argi++];
   }
-  if (n == LLONG_MAX && errno == ERANGE) {
-    return false;
+
+  bool errorReport() {
+    return err(-1, "Not enough arguments for %s",argv[argc-1]);
   }
-  if (num != nullptr) {
-    *num = n;
-  }
-  return true;
+
+
+  template<typename StringAssignable>  bool operator>>(StringAssignable &target) {
+
+    if (argi < argc) {
+      if constexpr (std::is_integral<StringAssignable>::value) {
+    target = std::stoll(argv[argi++]);
+} else {
+  target = argv[argi++];
 }
-
-/* @returns a valid number or dies.
- * @deprecated
- */
-static long long xstr_to_num(const char *str) {
-  long long ret;
-
-  if (!str_to_num(str, &ret)) {
-    err(-1, "number \"%s\" is invalid", str);
+      return true;
+    } else {
+      return errorReport();
+    }
   }
-  return ret;
-}
+
+private:
+  int argc;
+  char **argv;
+  int argi = 0;
+};
 
 bool Server::parse_commandline(int argc, char *argv[]) {
-  if (argc < 2 || (argc == 2 && strcmp(argv[1], "--help") == 0)) {
-    usage(argv[0]); /* no wwwroot given */
-    // exit(EXIT_SUCCESS);
-    return false;
-  }
-  bindport = getuid() ? 8080 : 80; // default if run as root.
-  custom_hdrs.clear();
+  // if (argc < 2 || (argc == 2 && strcmp(argv[1], ) == 0)) {}
+  bindport = getuid() ? 8080 : 80; // default depends on whether run as root.
+  // custom_hdrs.clear();
 
-  wwwroot = argv[1];
-  wwwroot.trimTrailing("/"); //former code only trimmed a single trailing slash, 980f trims multiple.
-  if (wwwroot.length == 0) {
-    err(-1, "/path/to/wwwroot cannot be empty, nor / ");
-    return false;
-  }
+  CliScanner arg(argc, argv);
+   invocationName=arg();//there is always an arg0
 
-  /* walk through the remainder of the arguments (if any) */
-  for (int i = 2; i < argc; i++) {
-    if (strcmp(argv[i], "--port") == 0) {
-      if (++i >= argc) {
-        err(-1, "missing number after --port");
+  try {
+
+    if (arg.stillHas(1)) {
+      wwwroot = arg();
+      if (wwwroot == "--help") {
+        usage(argv[0]); /* no wwwroot given */
+        // exit(EXIT_SUCCESS);
         return false;
       }
-      bindport = xstr_to_num(argv[i]);
-    } else if (strcmp(argv[i], "--addr") == 0) {
-      if (++i >= argc) {
-        err(-1, "missing ip after --addr");
-        return false;
+      wwwroot.trimTrailing("/"); //former code only trimmed a single trailing slash, 980f trims multiple.
+      if (wwwroot.length == 0) {
+        return err(-1, "/path/to/wwwroot cannot be empty, nor / ");
       }
-      bindaddr = argv[i];
-    } else if (strcmp(argv[i], "--maxconn") == 0) {
-      if (++i >= argc) {
-        err(-1, "missing number after --maxconn");
-        return false;
-      }
-      max_connections = (int) xstr_to_num(argv[i]);
-    } else if (strcmp(argv[i], "--log") == 0) {
-      if (++i >= argc) {
-        err(-1, "missing filename after --log");
-        return false;
-      }
-      logfile_name = argv[i];
-    } else if (strcmp(argv[i], "--chroot") == 0) {
-      want_chroot = true;
+    } else { /* no wwwroot given */
+      usage(argv[0]);
+    }
+
+    /* walk through the remainder of the arguments (if any) */
+    while (arg.stillHas(1)) {
+      StringView token = arg();
+      if (token == "--port") {
+        arg >> bindport;
+      } else if (token ==  "--addr")  {
+        arg >> bindaddr ;
+      } else if (token ==  "--maxconn")  {
+        arg>> max_connections;
+      } else if (token ==  "--log")  {
+        arg>>        logfile_name ;
+      } else if (token ==  "--chroot")  {
+        want_chroot = true;
 #if DarklySupportDaemon
-    } else if (strcmp(argv[i], "--daemon") == 0) {
-      want_daemon = true;
+      } else if (token ==  "--daemon")  {
+        want_daemon = true;
 #endif
-    } else if (strcmp(argv[i], "--index") == 0) {
-      if (++i >= argc) {
-        err(-1, "missing filename after --index");
-        return false;
-      }
-      index_name = argv[i];
-    } else if (strcmp(argv[i], "--no-listing") == 0) {
-      no_listing = true;
-    } else if (strcmp(argv[i], "--mimetypes") == 0) {
-      if (++i >= argc) {
-        err(-1, "missing filename after --mimetypes");
-        return false;
-      }
-      load_mime_map_file(argv[i]);
-    } else if (strcmp(argv[i], "--default-mimetype") == 0) {
-      if (++i >= argc) {
-        err(-1, "missing string after --default-mimetype");
-        return false;
-      }
-      default_mimetype = argv[i];
-    } else if (strcmp(argv[i], "--uid") == 0) {
-      if (++i >= argc) {
-        err(-1, "missing uid after --uid");
-        return false;
-      }
-      passwd *p = getpwnam(argv[i]);
-      if (!p) {
-        p = getpwuid((uid_t) xstr_to_num(argv[i]));
-      }
-      if (!p) {
-        err(-1, "no such uid: `%s'", argv[i]);
-        return false;
-      }
-      drop_uid = p->pw_uid;
-    } else if (strcmp(argv[i], "--gid") == 0) {
-      if (++i >= argc) {
-        err(-1, "missing gid after --gid");
-        return false;
-      }
-      group *g = getgrnam(argv[i]);
-      if (!g) {
-        g = getgrgid((gid_t) xstr_to_num(argv[i]));
-      }
-      if (!g) {
-        err(-1, "no such gid: `%s'", argv[i]);
-      }
-      drop_gid = g->gr_gid;
+      } else if (token ==  "--index")  {
+        arg>>        index_name ;
+      } else if (token ==  "--no-listing")  {
+        no_listing = true;
+      } else if (token ==  "--mimetypes")  {
+        arg>>        mimeFileName ;
+      } else if (token ==  "--default-mimetype")  {
+        arg>>        default_mimetype ;
+      } else if (token ==  "--uid")  { //username or a number.
+        arg>>        drop_uid ;
+      } else if (token ==  "--gid")  {
+        arg>>        drop_gid ;
 #if DarklySupportDaemon
-    } else if (strcmp(argv[i], "--pidfile") == 0) {
-      if (++i >= argc) {
-        err(-1, "missing filename after --pidfile");
-      }
-      d.pid.file_name = argv[i];
+      } else if (token ==  "--pidfile")  {
+        arg>>        d.pid.file_name ;
 #endif
-    } else if (strcmp(argv[i], "--no-keepalive") == 0) {
-      want_keepalive = false;
+      } else if (token ==  "--no-keepalive")  {
+        want_keepalive = false;
 #if   DarklySupportAcceptanceFilter
-    } else if (strcmp(argv[i], "--accf") == 0) {
+    } else if (token ==  "--accf")  {
       want_accf = true;
 #endif
-    } else if (strcmp(argv[i], "--syslog") == 0) {
-      syslog_enabled = true;
+      } else if (token ==  "--syslog")  {
+        syslog_enabled = true;
 #if DarklySupportForwarding
-    } else if (strcmp(argv[i], "--forward") == 0) {
-      if (++i >= argc) {
-        err(-1, "missing host after --forward");
-      }
-      const char *host = argv[i];
-      if (++i >= argc) {
-        err(-1, "missing url after --forward");
-      }
-      const char *url = argv[i];
-      forward.map.add(host, url);
-    } else if (strcmp(argv[i], "--forward-all") == 0) {
-      if (++i >= argc) {
-        err(-1, "missing url after --forward-all");
-      }
-      forward.all_url = argv[i];
-    } else if (strcmp(argv[i], "--forward-https") == 0) {
-      forward.to_https = true;
+      } else if (token ==  "--forward")  {
+        if (arg.stillHas(2)) {//having a syntax for a pack hostname:url would be simpler here.
+          char *host,*url;
+          arg>>host;
+          arg>>url;
+          forward.map.add(host, url);
+        } else {
+          err(-1, "--forward needs two following args, host then url ");
+        }
+      } else if (token ==  "--forward-all")  {
+        arg>>        forward.all_url ;
+      } else if (token ==  "--forward-https")  {
+        forward.to_https = true;
 #endif
-    } else if (strcmp(argv[i], "--no-server-id") == 0) {
-      want_server_id = false;
-    } else if (strcmp(argv[i], "--timeout") == 0) {
-      if (++i >= argc) {
-        err(-1, "missing number after --timeout");
+      } else if (token ==  "--no-server-id")  {
+        want_server_id = false;
+      } else if (token ==  "--timeout")  {
+        arg>>        timeout_secs ;
+      } else if (token ==  "--auth")  {
+        arg>>auth;//rest of parsing and checking is in operator= of Authorization.
+      } else if (token ==  "--header")  {
+        char *header;
+        arg>>header;
+        if (strchr(header, '\n') != nullptr || strstr(header, ": ") == nullptr) {//note: this requires quoting to keep shell from seeing these as two args.
+          err(-1, "malformed argument after --header");
+        }
+        custom_hdrs.push_back(header);
       }
-      timeout_secs = (int) xstr_to_num(argv[i]);
-    } else if (strcmp(argv[i], "--auth") == 0) {
-      if (++i >= argc || strchr(argv[i], ':') == nullptr) {
-        err(-1, "missing 'user:pass' after --auth");
-      }
-      auth.key = argv[i]; //todo: encrypt so memory inspection doesn't leak password
-    } else if (strcmp(argv[i], "--header") == 0) {
-      if (++i >= argc) {
-        err(-1, "missing argument after --header");
-      }
-      if (strchr(argv[i], '\n') != nullptr || strstr(argv[i], ": ") == nullptr) {
-        err(-1, "malformed argument after --header");
-      }
-      //the following is not efficient, what we really need is a list of strings that we cat together in the stream output.
-      custom_hdrs.push_back(argv[i]);
-    }
 #ifdef HAVE_INET6
-    else if (strcmp(argv[i], "--ipv6") == 0) {
-      inet6 = true;
-    }
+      else if (token ==  "--ipv6")  {
+        inet6 = true;
+      }
 #endif
-    else {
-      err(-1, "unknown argument `%s'", argv[i]);
-      return false;
+      else {
+        err(-1, "unknown argument `%s'", token.pointer);
+        return false;
+      }
     }
+
+    return true;
+  } catch (...) {
+    //todo: add specific clauses with specific error messages.
+    return false;
   }
-  return true;
 }
 
 
@@ -1086,22 +1066,17 @@ static char HEX_TO_DIGIT(char hex) {
 /* Decode URL by converting %XX (where XX are hexadecimal digits) to the
  * character it represents.  Don't forget to free the return value.
  */
-static char *urldecode(const char *url) {
-  size_t len = strlen(url);
-  char *out = static_cast<char *>(xmalloc(len + 1));
-  char *writer = out;
-
-  while (char c = *url++) {
-    if (c == '%' && url[1] && isxdigit(url[1]) // because we have already used strlen we know there is a null char we can rely upon here
-        && url[2] && isxdigit(url[2])) {
-      *writer++ = HEX_TO_DIGIT(*url++) << 4 | HEX_TO_DIGIT(*url++);
+static void urldecode(StringView url) {
+  auto reader = url.begin();
+  auto writer = url.begin();
+  while (char c = *reader++) {
+    if (c == '%' && reader[1] && isxdigit(reader[1]) && reader[2] && isxdigit(reader[2])) {
+      *writer++ = HEX_TO_DIGIT(*reader++) << 4 | HEX_TO_DIGIT(*reader++);
       continue;
     }
     *writer++ = c; /* straight copy */
   }
-
-  *writer = 0;
-  return out;
+  url.truncateAt(writer);
 }
 
 void Connection::startHeader(const int errcode, const char *errtext) {
@@ -1189,7 +1164,7 @@ void Connection::addFooter() {
 }
 
 /* A default reply for any (erroneous) occasion. */
-void Connection::default_reply(const int errcode, const char *errname, const char *format, ...) {
+void Connection::error_reply(const int errcode, const char *errname, const char *format, ...) {
   startReply(errcode, errname);
   va_list va;
   va_start(va, format);
@@ -1254,17 +1229,16 @@ void Connection::redirect(const char *proto, const char *hostname, const char *u
 
 void Connection::redirect_https() {
   /* work out path of file being requested */
-  AutoString url(urldecode(url));
+  urldecode(url);
 
   /* make sure it's safe */
   if (!make_safe_url(url)) {
-    default_reply(400, "Bad Request", "You requested an invalid URL.");
+    error_reply(400, "Bad Request", "You requested an invalid URL.");
     return;
   }
 
-
   if (!hostname) {
-    default_reply(400, "Bad Request", "Missing 'Host' header.");
+    error_reply(400, "Bad Request", "Missing 'Host' header.");
     return;
   }
   redirect("https://", hostname, url);
@@ -1293,6 +1267,9 @@ bool Connection::parse_request() {
   if (!url) {
     return false;
   }
+
+  /* work out path of file being requested */
+  urldecode(url);
 
   /* strip out query params */
   urlParams = url.find('?');
@@ -1542,11 +1519,11 @@ public:
     DirectoryListing list;
     if (!list(path, true)) { /* then an opendir() failed */
       if (errno == EACCES) {
-        conn.default_reply(403, "Forbidden", "You don't have permission to access this URL.");
+        conn.error_reply(403, "Forbidden", "You don't have permission to access this URL.");
       } else if (errno == ENOENT) {
-        conn.default_reply(404, "Not Found", "The URL you requested was not found.");
+        conn.error_reply(404, "Not Found", "The URL you requested was not found.");
       } else {
-        conn.default_reply(500, "Internal Server Error", "Couldn't list directory: %s", strerror(errno));
+        conn.error_reply(500, "Internal Server Error", "Couldn't list directory: %s", strerror(errno));
       }
       return;
     }
@@ -1604,25 +1581,22 @@ public:
 void Connection::process_get() {
   char lastmod[DATE_LEN];
 
-  /* work out path of file being requested */
-  AutoString decoded_url(urldecode(url));
-
   /* make sure it's safe */
-  if (!make_safe_url(decoded_url)) {
-    default_reply(400, "Bad Request", "You requested an invalid URL.");
+  if (!make_safe_url(url)) {
+    error_reply(400, "Bad Request", "You requested an invalid URL.");
     return;
   }
 #if DarklySupportForwarding
   auto forward_to = service.forward(hostname);
   if (forward_to) {
-    redirect("%s%s", forward_to, decoded_url.pointer);
+    redirect(nullptr, forward_to, url.pointer); //todo: use flag for proto field
     return;
   }
 #endif
   const char *mimetype(nullptr);
-  AutoString target;
+  AutoString target = url;
 
-  if (decoded_url.endsWith('/')) {
+  if (url.endsWith('/')) {
     /* does it end in a slash? serve up url/index_name */
     target.cat(service.index_name);
     if (!file_exists(target)) {
@@ -1631,17 +1605,16 @@ void Connection::process_get() {
          * indistinguishable from the directory not existing.
          * i.e.: Don't leak information.
          */
-        default_reply(404, "Not Found", "The URL you requested was not found.");
+        error_reply(404, "Not Found", "The URL you requested was not found.");
         return;
       }
-      generate_dir_listing(decoded_url, decoded_url);
+      generate_dir_listing(url, url); //todo: modify this to generate a content file, swapping out the file name and proceding in this module to get it sent.
       return;
     }
     mimetype = service.url_content_type(service.index_name);
   } else {
     /* points to a file */
-    target = decoded_url;
-    mimetype = service.url_content_type(decoded_url);
+    mimetype = service.url_content_type(url);
   }
 
   debug("url=\"%s\", target=\"%s\", content-type=\"%s\"\n", url.pointer, target.pointer, mimetype);
@@ -1651,28 +1624,28 @@ void Connection::process_get() {
 
   if (!reply.content.fd) { /* open() failed */
     if (errno == EACCES) {
-      default_reply(403, "Forbidden", "You don't have permission to access this URL.");
+      error_reply(403, "Forbidden", "You don't have permission to access this URL.");
     } else if (errno == ENOENT) {
-      default_reply(404, "Not Found", "The URL you requested was not found.");
+      error_reply(404, "Not Found", "The URL you requested was not found.");
     } else {
-      default_reply(500, "Internal Server Error", "The URL you requested cannot be returned: %s.", strerror(errno));
+      error_reply(500, "Internal Server Error", "The URL you requested cannot be returned: %s.", strerror(errno));
     }
     return;
   }
 
   struct stat filestat;
   if (fstat(reply.content.fd, &filestat) == -1) {
-    default_reply(500, "Internal Server Error", "fstat() failed: %s.", strerror(errno));
+    error_reply(500, "Internal Server Error", "fstat() failed: %s.", strerror(errno));
     return;
   }
   reply.file_length = filestat.st_size;
 
   /* make sure it's a regular file */
   if (S_ISDIR(filestat.st_mode)) {
-    redirect(nullptr, "/", url);
+    redirect(nullptr, "/", url); //todo:  probably should be same args as other redirect.
     return;
   } else if (!S_ISREG(filestat.st_mode)) {
-    default_reply(403, "Forbidden", "Not a regular file.");
+    error_reply(403, "Forbidden", "Not a regular file.");
     return;
   }
 
@@ -1682,7 +1655,7 @@ void Connection::process_get() {
   if (if_mod_since.notTrivial() && strcmp(lastmod, if_mod_since) <= 0) { //original code compared for equal, making this useless. We want file mod time any time after the given
     debug("not modified since %s\n", if_mod_since.pointer);
     reply.header_only = true;
-    startCommonHeader(304, "Not Modified"); //leaving off third arg leaves off ContentLength header
+    startCommonHeader(304, "Not Modified"); //leaving off third arg leaves off ContentLength header, apparently not needed with a 304.
     endHeader();
     return;
   }
@@ -1718,12 +1691,12 @@ void Connection::process_get() {
     }
 
     if (from >= filestat.st_size) {
-      default_reply(416, "Requested Range Not Satisfiable", "You requested a range outside of the file.");
+      error_reply(416, "Requested Range Not Satisfiable", "You requested a range outside of the file.");
       return;
     }
 
     if (to < from) {
-      default_reply(416, "Requested Range Not Satisfiable", "You requested a backward range.");
+      error_reply(416, "Requested Range Not Satisfiable", "You requested a backward range.");
       return;
     }
     reply.start = from;
@@ -1748,23 +1721,25 @@ void Connection::process_request() {
   service.fyi.num_requests++;
 
   if (!parse_request()) {
-    default_reply(400, "Bad Request", "You sent a request that the server couldn't understand.");
+    error_reply(400, "Bad Request", "You sent a request that the server couldn't understand.");
     return;
   }
-  if (is_https_redirect) {
+#if DarklySupportForwarding
+  if (service.forward.to_https && is_https_redirect) { //this seems to forward all traffic to https due to clause of "no X-forward-proto", but it replicates original source's logic.
     redirect_https();
-  }
+  } else
+#endif
   /* fail if: (auth_enabled) AND (client supplied invalid credentials) */
-  else if (!service.auth(authorization)) {
-    default_reply(401, "Unauthorized", "Access denied due to invalid credentials.");
-  } else if (method == GET) {
-    process_get();
-  } else if (method == HEAD) {
-    process_get();
-    reply.header_only = true;
-  } else {
-    default_reply(501, "Not Implemented", "The method you specified is not implemented.");
-  }
+    if (!service.auth(authorization)) {
+      error_reply(401, "Unauthorized", "Access denied due to invalid credentials.");
+    } else if (method == GET) {
+      process_get();
+    } else if (method == HEAD) {
+      reply.header_only = true; //setting early so that process can skip steps such as just sizing a response rather than generating it.
+      process_get();
+    } else {
+      error_reply(501, "Not Implemented", "The method you specified is not implemented.");
+    }
   /* advance state */
   state = SEND_HEADER;
 }
@@ -2199,6 +2174,30 @@ void Server::Daemon::finish() {
 }
 #endif
 
+bool Server::DropPrivilege::validate() {
+  if (asGgroup) {
+    group *g = getgrnam(byName);
+    if (!g) {
+      g = getgrgid(atoi(byName));
+    }
+    if (g) {
+      byNumber=g->gr_gid;
+      return true;
+    }
+  } else {
+    passwd *p = getpwnam(byName);
+    if (!p) {
+      p = getpwuid(atoi(byName));
+    }
+    if (p) {
+      byNumber=p->pw_uid;
+      return true;
+    }
+  }
+  err(-1, "no such %s: `%s'", asGgroup?"gid":"uid", byName);
+  return false;
+}
+
 void Server::change_root() {
 #ifdef HAVE_NON_ROOT_CHROOT
   /* We run this even as root, which should never be a bad thing. */
@@ -2246,7 +2245,11 @@ void Server::reportStats() const {
   printf("Bytes: %llu in, %llu out\n", llu(fyi.total_in), llu(fyi.total_out));
 }
 
-void Server::prepareToRun() {
+bool Server::prepareToRun() {
+  if (mimeFileName) {
+    load_mime_map_file(mimeFileName);
+  }
+
   init_sockin();
 
   /* open logfile */
@@ -2256,6 +2259,7 @@ void Server::prepareToRun() {
     logfile = fopen(logfile_name, "ab");
     if (logfile == nullptr) {
       err(1, "opening logfile: fopen(\"%s\")", logfile_name);
+      return false;
     }
   }
 #if DarklySupportDaemon
@@ -2266,35 +2270,47 @@ void Server::prepareToRun() {
   /* signals */
   if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
     err(1, "signal(ignore SIGPIPE)");
+    return false;
   }
   // to make the following work we have to only have one DarkHttpd per process. We'd have to make a registry of them and match process to something the signal provides.
   if (signal(SIGINT, stop_running) == SIG_ERR) {
     err(1, "signal(SIGINT)");
+    return false;
   }
   if (signal(SIGTERM, stop_running) == SIG_ERR) {
     err(1, "signal(SIGTERM)");
+    return false;
   }
 
   /* security */
   if (want_chroot) {
     change_root();
   }
-  if (drop_gid != INVALID_GID) {
-    gid_t list[1];
-    list[0] = drop_gid;
-    if (setgroups(1, list) == -1) {
-      err(1, "setgroups([%d])", (int) drop_gid);
+  try {
+    if (drop_gid) {
+      drop_gid.validate();
+      gid_t list[1] = {drop_gid};
+      if (setgroups(1, list) == -1) {//todo: this seems aggressive/intrusive, I'd rather have the gid drop fail if the user is not already in that supposedly limited group.
+        err(1, "setgroups([%u])", unsigned(drop_gid));
+        return false;
+      }
+      if (setgid(drop_gid) == -1) {
+        err(1, "setgid(%u)", unsigned(drop_gid));
+        return false;
+      }
+      printf("set gid to %u\n", unsigned(drop_gid));
     }
-    if (setgid(drop_gid) == -1) {
-      err(1, "setgid(%d)", (int) drop_gid);
+    if (drop_uid) {
+      drop_uid.validate();
+      if (setuid(drop_uid) == -1) {
+        err(1, "setuid(%u)", unsigned(drop_uid));
+        return false;
+      }
+      printf("set uid to %u\n", unsigned(drop_uid));
     }
-    printf("set gid to %d\n", (int) drop_gid);
-  }
-  if (drop_uid != INVALID_UID) {
-    if (setuid(drop_uid) == -1) {
-      err(1, "setuid(%d)", (int) drop_uid);
-    }
-    printf("set uid to %d\n", (int) drop_uid);
+  } catch (...) {
+    err(1, "uid or gid params neither valid name nor valid id value");
+    return false;
   }
 #if DarklySupportDaemon
   d.pid.create(); //creating even if it isn't actually going to be used as a soliton enforcer for the daemon state.
@@ -2303,6 +2319,7 @@ void Server::prepareToRun() {
     d.finish();
   }
 #endif
+  return true;
 }
 
 void Server::freeall() {
@@ -2342,26 +2359,20 @@ void Server::Daemon::PidFiler::Remove(const char *why) {
   err(1, why); //ignore format-security warning, it can't work here.
 }
 
-int Server::Daemon::PidFiler::file_read() {
-  char buf[16];
-  long long pid;
+bool Server::Daemon::PidFiler::file_read() {
 
   Fd::operator=(open(file_name, O_RDONLY));
   if (!seemsOk()) {
-    err(1, " after create failed");
+    return err(1, " after create failed");
   }
 
-  auto i = read(fd, buf, sizeof(buf) - 1);
+  auto i = read(fd, lastRead, sizeof(lastRead) - 1);
   if (i == -1) {
-    err(1, "read from pidfile failed");
+    return err(1, "read from pidfile failed");
   }
   close();
-  buf[i] = '\0';
-
-  if (!str_to_num(buf, &pid)) {
-    err(1, "invalid pidfile contents: \"%s\"", buf);
-  }
-  return pid;
+  lastRead[i] = '\0';
+  return true;
 }
 
 #define PIDFILE_MODE 0600
@@ -2370,27 +2381,23 @@ void Server::Daemon::PidFiler::create() {
   if (!file_name) {
     return;
   }
-
-  char pidstr[16];
-
   /* Open the PID file and obtain exclusive lock. */
   fd = open(file_name, O_WRONLY | O_CREAT | O_EXLOCK | O_TRUNC | O_NONBLOCK, PIDFILE_MODE);
   if (fd == -1) {
     if ((errno == EWOULDBLOCK) || (errno == EEXIST)) {
-      err(-1, "daemon already running with PID %d", file_read());
+      if (file_read()) {
+        err(-1, "daemon already running with PID %s", lastRead);
+      }
     } else {
       err(1, "can't create pidfile %s", file_name);
     }
   }
-
-  if (ftruncate(fd, 0) == -1) {
-    Remove("ftruncate() failed");
-  }
-
-  snprintf(pidstr, sizeof(pidstr), "%d", getpid());
-  if (pwrite(fd, pidstr, strlen(pidstr), 0) != strlen(pidstr)) {
-    Remove("pwrite() failed");
-  }
+  //removed as we use O_TRUNC and file won't open if it can't be truncated.
+  // if (ftruncate(fd, 0) == -1) {
+  //   Remove("ftruncate() failed");
+  // }
+  lastWrote=getpid();
+  printf( "%d", lastWrote);
 }
 #endif
 

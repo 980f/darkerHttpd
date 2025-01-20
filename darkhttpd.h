@@ -240,7 +240,7 @@ namespace DarkHttpd {
 
     void addFooter();
 
-    void default_reply(int errcode, const char *errname, const char *format, ...) checkFargs(4, 5);
+    void error_reply(int errcode, const char *errname, const char *format, ...) checkFargs(4, 5);
 
     void endReply();
 
@@ -248,7 +248,7 @@ namespace DarkHttpd {
 
     void redirect_https();
 
-    bool is_https_redirect;
+    bool is_https_redirect;//todo: usage seems bonkers, need to check original code. This just indicates protocol that the client sent out, in case intervening layers stripped that info. Its only use should be on outgoing requests.
 
     bool parse_request();
 
@@ -271,8 +271,6 @@ namespace DarkHttpd {
     static Server *forSignals; //epoll will let us eliminate this, it adds a user pointer to the notification structure.
     static void stop_running(int sig);
 
-    Fd sockin; /* socket to accept connections from */
-
 #ifdef HAVE_INET6
     bool inet6 = false; /* whether the socket uses inet6 */
 #endif
@@ -280,41 +278,85 @@ namespace DarkHttpd {
     const char *bindaddr = nullptr; //only assigned from cmdline
     uint16_t bindport; /* or 80 if running as root */
     int max_connections = -1; /* kern.ipc.somaxconn */
-
-    /** the entries will all be dynamically allocated */
-    std::forward_list<Connection *> connections;
-
-    bool accepting = true; /* set to 0 to stop accept()ing */
+    bool want_daemon = false;
     bool syslog_enabled = false;
+    /* If a connection is idle for timeout_secs or more, it gets closed and
+         * removed from the connlist.
+         */
+    unsigned timeout_secs = 30;
 
 
-    volatile bool running = false; /* signal handler sets this to false */
+    const char *default_mimetype = nullptr;
+    /** file of mime mappings gets read into here.*/
+    AutoString mimeFileContent;
+    /** file to load mime types map from */
+    char * mimeFileName;
+
+    //todo: load only from file, not commandline. Might even drop feature.
+    std::vector<const char *> custom_hdrs; //parse_commandline concatenation of argv's with formatting. Should just record their indexes and generate on sending rather than cacheing here.
+#if DarklySupportAcceptanceFilter
+    bool want_accf = false;//FreeBSD accept filter (replace runtime bitch with compile time flag and complaint when parsing command line/file
+#endif
+
+    bool want_keepalive = true;
+    bool want_server_id = true;
+    StringView wwwroot; /* a path name */ //argv[1]  and even if we demonize it is still present
+
+    char *logfile_name = nullptr; /* NULL = no logging */
+    bool want_chroot = false;
+
+    const char *index_name = "index.html";
+    bool no_listing = false;
 
 #define INVALID_UID ((uid_t) ~0)
 #define INVALID_GID ((gid_t) ~0)
 
-    uid_t drop_uid = INVALID_UID;
-    gid_t drop_gid = INVALID_GID;
+    struct DropPrivilege {
+      bool asGgroup;
+      char * byName = nullptr;
+      unsigned byNumber;
+
+      bool operator !() const {
+        return byName != nullptr;
+      }
+      operator unsigned()const {
+        return byNumber;
+      }
+      bool validate();
+      void operator=(char *arg) {
+        byName = arg;
+        //maybe: validate()
+        byNumber = atoi(arg);//unchecked conversion
+      }
+    };
+    DropPrivilege drop_uid{false};
+    DropPrivilege drop_gid{true};
+
+    /* name program was launched with, will eventually log it */
+    char * invocationName;
+
+  protected:
+    Fd sockin; /* socket to accept connections from */
+    /** the entries will all be dynamically allocated */
+    std::forward_list<Connection *> connections;
+
+    bool accepting = true; /* set to 0 to stop accept()ing */
+
+    volatile bool running = false; /* signal handler sets this to false */
 
     void change_root();
 
-    void prepareToRun();
+    bool prepareToRun();
 
     void httpd_poll();
-
 
     void reportStats() const;
 
     void freeall();
 
-
     void load_mime_map_file(const char *filename);
 
     void init_sockin();
-
-    void usage(const char *argv0);
-
-    bool parse_commandline(int argc, char *argv[]);
 
     void accept_connection();
 
@@ -347,25 +389,27 @@ namespace DarkHttpd {
        * Original was copyright (c) 2005 Pawel Jakub Dawidek <pjd@FreeBSD.org>
        */
       struct PidFiler : Fd {
+
         char *file_name = nullptr; /* NULL = no pidfile */
 
         void remove();
 
         void Remove(const char *why);
 
-        int file_read();
+        bool file_read();
 
         void create();
+        pid_t lastWrote=0;
+
+        char lastRead[8];//4 meg is the largest of any OS of interest for the foreseeable future, we are not going to run this code on a super computer cluster.
       } pid;
 
       bool start();
 
       void finish();
     } d;
-    bool want_daemon = false;
+
 #endif
-
-
 
     // const char *generated_on(const char date[DATE_LEN]) const;
 
@@ -374,33 +418,7 @@ namespace DarkHttpd {
       forSignals = this;
     }
 
-    /* If a connection is idle for timeout_secs or more, it gets closed and
-     * removed from the connlist.
-     */
-    unsigned timeout_secs = 30;
-    const char *default_mimetype = nullptr;
-    /** file of mime mappings gets read into here.*/
-    AutoString mimeFileContent;
-
-
-    //todo: load only from file, not commandline. Might even drop feature. Alternative is a std::vector of headers rather than a blob.
-    std::vector<const char *> custom_hdrs; //parse_commandline concatenation of argv's with formatting. Should just record their indexes and generate on sending rather than cacheing here.
-#if DarklySupportAcceptanceFilter
-    bool want_accf = false;//FreeBSD accept filter (replace runtime bitch with compile time flag and complaint when parsing command line/file
-#endif
-
-    bool want_keepalive = true;
-    bool want_server_id = true;
-    StringView wwwroot; /* a path name */ //argv[1]  and even if we demonize it is still present
-
-    char *logfile_name = nullptr; /* NULL = no logging */
     FILE *logfile = nullptr;
-
-
-    bool want_chroot = false;
-
-    const char *index_name = "index.html";
-    bool no_listing = false;
 
     /** time of latest event, in 3 formats. */
     struct Now {
@@ -467,6 +485,10 @@ namespace DarkHttpd {
     struct Authorizer {
       AutoString key; /* NULL or "Basic base64_of_password" */ //base64 expansion of a cli arg.
       bool operator()(StringView authorization);
+      void operator=(char *arg) {
+        //todo: check for ':' and split?
+        key = strdup(arg);//todo: chase heritage and try to reduce key to StringView.
+      }
     } auth;
 
     /** things that are interesting but don't affect operation */
@@ -476,6 +498,10 @@ namespace DarkHttpd {
       uint64_t total_out = 0;
     } fyi;
   public:
+
+    void usage(const char *argv0);
+
+    bool parse_commandline(int argc, char *argv[]);
 
     int main(int argc, char **argv);
   };
