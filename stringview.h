@@ -58,9 +58,9 @@ struct StringView {
   StringView subString(size_t start, size_t pastEnd) const;
 
   /** @returns pointer to byte after where this StringView's content was inserted. If this guy is trivial then this will be the same as @param bigenough which is where the contents of this object are copied into.
-   * @param honorNull is whether to stop inserting this guy if a null is found short of the length.
+   * @param honorNull is whether to stop inserting this guy if a null is found in this short of the length. Such a null is NOT copied into bigenough.
+   * Typical use is to assign a null to the returned value  *view.put(target,true)=0;
    */
-  // char *put(char *bigenough, bool honorNull = true) const;
   char *put(char *bigenough, bool honorNull) const;
 
   /* @returns index of first instance of @param sought found looking backwards from @param searchpoint not including searchpoint itself, -1 if char not found. */

@@ -47,14 +47,14 @@ char *StringView::put(char *bigenough, bool honorNull) const {
     if (pointer) {
       if (length) {
         for (size_t count = 0; count < length; ++count) {
-          *bigenough++ = pointer[count];
-          if (honorNull && !pointer[count]) {
+          char c= pointer[start+count];
+          if (honorNull && !c) {
             break;
           }
+          *bigenough++ = c;
         }
       }
     }
-    //this needs to be conditional for when we insert this guy into a right-sized hole inside *bigenough=0;
   }
   return bigenough;
 }

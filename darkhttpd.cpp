@@ -1422,11 +1422,12 @@ void Connection::process_get() {
   }
 #endif
   const char *mimetype(nullptr);
-  AutoString target = url;
+  char target[FILENAME_MAX];
+  *url.put(target,true)=0;
 
   if (url.endsWith('/')) {
     /* does it end in a slash? serve up url/index_name */
-    target.cat(service.index_name);
+    strcat(target,service.index_name);
     if (!file_exists(target)) {
       if (service.no_listing) {
         /* Return 404 instead of 403 to make --no-listing
@@ -1445,7 +1446,7 @@ void Connection::process_get() {
     mimetype = service.url_content_type(url);
   }
 
-  debug("url=\"%s\", target=\"%s\", content-type=\"%s\"\n", url.pointer, target.pointer, mimetype);
+  debug("url=\"%s\", target=\"%s\", content-type=\"%s\"\n", url.pointer, target, mimetype);
 
   /* open file */
   reply.content.fd = open(target, O_RDONLY | O_NONBLOCK);
