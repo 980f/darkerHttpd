@@ -26,8 +26,8 @@ add_executable(
 
 target_compile_definitions(darkerhttpd PUBLIC
   DarklySupportForwarding=1
-  DarklySupportDaemon=1
-  DarklySuppportAcceptanceFilters=1
+  DarklySupportDaemon=0
+  DarklySuppportAcceptanceFilters=0
 )
 
 

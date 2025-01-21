@@ -8,8 +8,6 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
-#include <bits/ranges_util.h>
-
 
 StringView::StringView(char *pointer, size_t length, size_t start): pointer{pointer},
   length{length},
@@ -47,7 +45,7 @@ char *StringView::put(char *bigenough, bool honorNull) const {
     if (pointer) {
       if (length) {
         for (size_t count = 0; count < length; ++count) {
-          char c= pointer[start+count];
+          char c = pointer[start + count];
           if (honorNull && !c) {
             break;
           }

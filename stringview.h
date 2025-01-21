@@ -33,10 +33,9 @@ struct StringView {
   bool operator==(const char *toMatch) const;
 
   /** case insensitive compare */
-  bool operator==(const StringView& toMatch) const;
+  bool operator==(const StringView &toMatch) const;
 
   //todo:1 exact string compares, not ignoring case.
-
 
   operator char *() const {
     return begin();

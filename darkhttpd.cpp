@@ -23,7 +23,7 @@
  * PERFORMANCE OF THIS SOFTWARE.
  *
  * It has been heavily modified to make it a module that can be included in other programs.
- * todo: epoll instead of select. Grr,no epoll on FreeBSD or NetBSD so we will use ppoll instead.
+ * todo: epoll instead of select. Grr,no epoll on FreeBSD or NetBSD so we will use ppoll instead. Well, some dox says FreeBSD does have epoll. Apparently if you have kqueue there is a userspace implementation of epoll.
 */
 
 #include "darkhttpd.h"
@@ -317,7 +317,7 @@ static bool make_safe_url(StringView url) {
 Server *Server::forSignals = nullptr; // trusting BSS zero to clear this.
 
 /* Default mimetype mappings
- * //todo: use xdg-mime on systems which have it
+ * //nope: use xdg-mime on systems which have it, don't do this as the list is much larger than what we have here with lots of local user preferences.
  * //todo: only use file, with cli options to generate one from this string.
  */
 static const char *default_extension_map = { //todo: move to class
@@ -352,22 +352,21 @@ static const char *default_extension_map = { //todo: move to class
   "video/x-msvideo: avi\n"
   "video/mp4: mp4 m4v\n"
 };
-//file gets read into here.
 
-/* ---------------------------------------------------------------------------
- * Adds contents of specified file to mime_map list.
- */
-void Server::load_mime_map_file(const char *filename) {
-  auto fd = open(filename, 0);
+void Server::Mimer::start() {
+  if (!fileName) {
+    return ;
+  }
+  auto fd = open(fileName, 0);
   if (fd > 0) {
     struct stat filestat;
     if (fstat(fd, &filestat) == 0) {
-      if (mimeFileContent.malloc(filestat.st_size)) { //#freed in main()
-        if (read(fd, mimeFileContent, filestat.st_size) == filestat.st_size) {
+      if (fileContent.malloc(filestat.st_size)) { //#freed in main()
+        if (read(fd, fileContent, filestat.st_size) == filestat.st_size) {
           //the malloc member put a null in so we should be ready to roll.
         } else {
-          warn("File I/O issue loading mimetypes file, %s, content ignored", filename);
-          mimeFileContent.Free();
+          warn("File I/O issue loading mimetypes file, %s, content ignored", fileName);
+          fileContent.Free();
         }
       }
     }
@@ -375,11 +374,11 @@ void Server::load_mime_map_file(const char *filename) {
 }
 
 
-const char *Server::url_content_type(const char *url) {
+const char *Server::Mimer::operator()(const char *url) {
   if (url) {
     if (auto period = strrchr(url, '.')) {
       StringView extension = const_cast<char *>(++period);
-      StringView pool = mimeFileContent ? mimeFileContent : StringView(const_cast<char *>(default_extension_map)); //the const_cast seems dangerous, but we will get a segv if we screw up, we will not get a silent bug.
+      StringView pool = fileContent ? fileContent : StringView(const_cast<char *>(default_extension_map)); //the const_cast seems dangerous, but we will get a segv if we screw up, we will not get a silent bug.
       ssize_t foundAt = pool.findLast(extension);
       if (foundAt >= 0) {
         //todo: idiot check that this extension is not in the middle of any other extension nor inside a mimetype
@@ -395,7 +394,7 @@ const char *Server::url_content_type(const char *url) {
     }
   }
   /* no period found in the string or extension not found in map */
-  return default_mimetype ? default_mimetype : "application/octet-stream";
+  return default_type ? default_type : "application/octet-stream";
 }
 
 const char *Server::get_address_text(const void *addr) const {
@@ -561,7 +560,7 @@ void Server::usage(const char *argv0) {
   printf("\t--mimetypes filename (optional)\n"
     "\t\tParses specified file for extension-MIME associations.\n\n");
   printf("\t--default-mimetype string (optional, default: %s)\n"
-    "\t\tFiles with unknown extensions are served as this mimetype.\n\n", default_mimetype);
+    "\t\tFiles with unknown extensions are served as this mimetype.\n\n", contentType.default_type);
   printf("\t--uid uid/uname, --gid gid/gname (default: don't privdrop)\n"
     "\t\tDrops privileges to given uid:gid after initialization.\n\n");
   printf("\t--chroot (default: don't chroot)\n"
@@ -689,9 +688,9 @@ bool Server::parse_commandline(int argc, char *argv[]) {
       } else if (token == "--no-listing") {
         no_listing = true;
       } else if (token == "--mimetypes") {
-        arg >> mimeFileName;
+        arg >> contentType.fileName;
       } else if (token == "--default-mimetype") {
-        arg >> default_mimetype;
+        arg >> contentType.default_type;
       } else if (token == "--uid") { //username or a number.
         arg >> drop_uid;
       } else if (token == "--gid") {
@@ -844,7 +843,6 @@ Connection::Connection(Server &parent, int fd): socket(fd), service(parent), the
 
 void Connection::clear() {
   received.length = 0;
-  parsed.length = 0;
   method = NotMine;
   url = nullptr;
   referer = nullptr;
@@ -880,13 +878,12 @@ void Connection::poll_check_timeout() {
 }
 
 
-
 static char HEX_TO_DIGIT(char hex) {
-  if (hex >= 'A' && hex <= 'F') {
-    return hex - 'A' + 10;
-  }
-  if (hex >= 'a' && hex <= 'f') {
+  if (hex >= 'a') {
     return hex - 'a' + 10;
+  }
+  if (hex >= 'A') {
+    return hex - 'A' + 10;
   }
   return hex - '0';
 }
@@ -1074,8 +1071,8 @@ void Connection::redirect_https() {
 }
 
 
-/* Parse an HTTP request like "GET /urlGoes/here HTTP/1.1" to get the method (GET), the
- * url (/), the referer (if given) and the user-agent (if given).
+/* Parse an HTTP request like "GET /urlGoes/here HTTP/1.1" to get the method (GET), the url (/), and those fields which are of interest to this application, ignoring any that are not.
+ * todo: inject nulls so that more str functions can be used.
  */
 bool Connection::parse_request() {
   /* parse method */
@@ -1417,7 +1414,7 @@ void Connection::process_get() {
 #if DarklySupportForwarding
   auto forward_to = service.forward(hostname);
   if (forward_to) {
-    redirect(nullptr, forward_to, url.pointer); //todo: use flag for proto field
+    redirect(nullptr, forward_to, url.begin()); //todo: use flag for proto field
     return;
   }
 #endif
@@ -1440,13 +1437,13 @@ void Connection::process_get() {
       generate_dir_listing(url, url); //todo: modify this to generate a content file, swapping out the file name and proceding in this module to get it sent.
       return;
     }
-    mimetype = service.url_content_type(service.index_name);
+    mimetype = service.contentType(service.index_name);
   } else {
     /* points to a file */
-    mimetype = service.url_content_type(url);
+    mimetype = service.contentType(url);
   }
 
-  debug("url=\"%s\", target=\"%s\", content-type=\"%s\"\n", url.pointer, target, mimetype);
+  debug("url=\"%s\", target=\"%s\", content-type=\"%s\"\n", url.begin(), target, mimetype);
 
   /* open file */
   reply.content.fd = open(target, O_RDONLY | O_NONBLOCK);
@@ -2121,10 +2118,7 @@ void Server::reportStats() const {
 }
 
 bool Server::prepareToRun() {
-  if (mimeFileName) {
-    load_mime_map_file(mimeFileName);
-  }
-
+  contentType.start();
   init_sockin();
 
   /* open logfile */
@@ -2135,6 +2129,7 @@ bool Server::prepareToRun() {
   }
 #endif
   /* signals */
+
   if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
     err(1, "signal(ignore SIGPIPE)");
     return false;

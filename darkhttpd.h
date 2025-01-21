@@ -96,22 +96,12 @@ namespace DarkHttpd {
       DONE /* connection closed, need to remove from queue */
     } state = DONE; // DONE makes it harmless so it gets garbage-collected if it should, for some reason, fail to be correctly filled out.
 
+    bool conn_closed = true;
+
     //the following should be a runtime or at least compile time option. This code doesn't support put or post so it does not receive arbitrarily large requests.
     static constexpr size_t RequestSizeLimit = 1023; //vastly more than is needed for most GET'ing, this would only be small for a PUT and we will stream around the buffer by parsing as the content arrives and recognizing the PUT and the header boundary soon enough to do that.
     char theRequest[RequestSizeLimit];
     StringView received{theRequest, 0, 0}; //bytes in.
-    StringView parsed{theRequest, 0, 0}; //the part of the request that has been parsed so far.
-
-    // struct Header {
-    //   const char *const name;
-    //   StringView value;
-    //
-    //   void clear() {
-    //     value.length = 0;
-    //   }
-    //
-    //   Header(const char *name): name(name), value{nullptr} {}
-    // };
 
     /* request fields */
     enum HttpMethods {
@@ -120,16 +110,14 @@ namespace DarkHttpd {
     } method;
 
     StringView hostname; //this was missing in original server, that failed to do hostname checking that is nominally required by RFC7230
-    StringView url; //sub_string(request)
+    StringView url;
     char *urlParams; //pointer to url text that followed a '?', 980f is considering using those in directory listings to support formatting options and the use a shell to ls for the listing.
-    StringView referer; //parse_field
-    StringView user_agent; //parse_field
-    StringView authorization; //parse_field
+    StringView referer;
+    StringView user_agent;
+    StringView authorization;
+    bool is_https_redirect; //This just indicates protocol that the client says that they sent out, in case intervening layers strip that info. Its only use should be on outgoing redirection requests. Should be named 'redirect_is_https'
     Now if_mod_since;
-
     ByteRange range;
-
-    bool conn_closed = true; //move this back to connection itself.
 
     struct Replier {
       int http_code = 0;
@@ -157,12 +145,8 @@ namespace DarkHttpd {
       };
 
       Block header;
-
       Block content;
-      // Fd content_fd;
-      // bool dont_free = false;
-      // off_t sent = 0;
-      //
+
       off_t start = 0;
       off_t file_length = 0;
       off_t total_sent = 0;
@@ -219,8 +203,6 @@ namespace DarkHttpd {
 
     void redirect_https();
 
-    bool is_https_redirect; //todo: usage seems bonkers, need to check original code. This just indicates protocol that the client sent out, in case intervening layers stripped that info. Its only use should be on outgoing requests.
-
     bool parse_request();
 
     void process_get();
@@ -237,7 +219,7 @@ namespace DarkHttpd {
   }; //end of connection child class
 
   class Server {
-    friend Connection;
+    friend Connection;//division of source into Server and Connection was done just to make more clear what is shared/configuration and what is per-request.
     /** until we use the full signal set ability to pass our object we only allow one DarkHttpd per process.*/
     static Server *forSignals; //epoll will let us eliminate this, it adds a user pointer to the notification structure.
     static void stop_running(int sig);
@@ -256,39 +238,14 @@ namespace DarkHttpd {
       char *file_name = nullptr; /* NULL = no logging */
       FILE *file = nullptr;
 
+      /* open the file, perhaps emit a line to make it easy to find start and stop times */
       bool begin();
-
+      /* close the file, perhaps with a sign-off message */
       void close();
-
-      // /* Should this character be logencoded?
-      //  */
-      // static bool needs_encoding(const unsigned char c) {
-      //   return ((c <= 0x1F) || (c >= 0x7F) || (c == '"'));
-      // }
-      //
-      // /* Encode string for logging.
-      //  */
-      // static void logencode(const char *src, char *dest) {
-      //   static const char hex[] = "0123456789ABCDEF";
-      //   int i, j;
-      //
-      //   for (i = j = 0; src[i] != '\0'; i++) {
-      //     if (needs_encoding((unsigned char) src[i])) {
-      //       dest[j++] = '%';
-      //       dest[j++] = hex[(src[i] >> 4) & 0xF];
-      //       dest[j++] = hex[src[i] & 0xF];
-      //     } else {
-      //       dest[j++] = src[i];
-      //     }
-      //   }
-      //   dest[j] = '\0';
-      // }
-      // template<typename Anything> void put(Anything thing);
-
-
+      /** each put method knows how to format its type to the output. */
       void put(char &&item) {
         if (syslog_enabled) {
-          syslog(LOG_INFO,"%c",item);
+          syslog(LOG_INFO, "%c", item);
         } else if (file) {
           fputc(item, file);
         }
@@ -296,7 +253,7 @@ namespace DarkHttpd {
 
       void put(const char * &&item) {
         if (syslog_enabled) {
-          syslog(LOG_INFO,"%s",item);
+          syslog(LOG_INFO, "%s", item);
         } else if (file) {
           fputs(item, file);
         }
@@ -304,13 +261,13 @@ namespace DarkHttpd {
 
       void put(time_t &&time) {
 #define CLF_DATE_LEN 29 /* strlen("[10/Oct/2000:13:55:36 -0700]")+1 */
-          char dest[CLF_DATE_LEN];
-          tm tm;
-          localtime_r(&time, &tm);
-          if (strftime(dest, CLF_DATE_LEN, "[%d/%b/%Y:%H:%M:%S %z]", &tm) == 0) {
-            dest[0] = 0;
-          }
-          put(dest);
+        char dest[CLF_DATE_LEN];
+        tm tm;
+        localtime_r(&time, &tm);
+        if (strftime(dest, CLF_DATE_LEN, "[%d/%b/%Y:%H:%M:%S %z]", &tm) == 0) {
+          dest[0] = 0;
+        }
+        put(dest);
 
 #undef CLF_DATE_LEN
       }
@@ -331,7 +288,7 @@ namespace DarkHttpd {
 
       void put(const StringView &view) {
         if (syslog_enabled) {
-          syslog(LOG_INFO,"%*s", int(view.length), view.begin());
+          syslog(LOG_INFO, "%*s", int(view.length), view.begin());
         } else if (file) {
           fprintf(file, "%*s", int(view.length), view.begin());
         }
@@ -340,7 +297,7 @@ namespace DarkHttpd {
       /* todo: this guy might be intercepting and truncating longer int types. But we already expect to choke on 2Gig+ files so fixing this is not urgent */
       void put(const int &number) {
         if (syslog_enabled) {
-          syslog(LOG_INFO,"%d", number);
+          syslog(LOG_INFO, "%d", number);
         } else if (file) {
           fprintf(file, "%d", number);
         }
@@ -350,7 +307,8 @@ namespace DarkHttpd {
         put(static_cast<time_t>(now));
       }
 
-      /* list processor template magic. Add a put() variation for any type that needs to be emitted */
+      /* output tab separated fields and a newline. No quoting is performed unless some type makes that sensible.
+       * list processor template magic. Add a put() variation for any type that needs to be emitted */
       template<typename First, typename... Rest> void tsv(First &&first, Rest &&... rest) {
         put(std::forward<First>(first));
         if constexpr (sizeof...(rest) > 0) {
@@ -368,11 +326,17 @@ namespace DarkHttpd {
     unsigned timeout_secs = 30;
     bool want_keepalive = true;
 
-    const char *default_mimetype = nullptr;
-    /** file of mime mappings gets read into here.*/
-    AutoString mimeFileContent;
-    /** file to load mime types map from */
-    char *mimeFileName;
+    struct Mimer {
+      const char *default_type = nullptr;
+      /** file of mime mappings gets read into here.*/
+      AutoString fileContent;
+      /** file to load mime types map from */
+      char *fileName=nullptr;
+
+      void start();
+      const char *operator()(const char *url);
+
+    } contentType;
 
     //todo: load only from file, not commandline. Might even drop feature.
     std::vector<const char *> custom_hdrs; //parse_commandline concatenation of argv's with formatting. Should just record their indexes and generate on sending rather than cacheing here.
@@ -440,8 +404,6 @@ namespace DarkHttpd {
 
     void freeall();
 
-    void load_mime_map_file(const char *filename);
-
     void init_sockin();
 
     void accept_connection();
@@ -449,7 +411,6 @@ namespace DarkHttpd {
     void log_connection(const Connection *conn);
 
   protected: //things connection can use
-    const char *url_content_type(const char *url);
 
     const char *get_address_text(const void *addr) const;
 
@@ -498,7 +459,7 @@ namespace DarkHttpd {
 #endif
 
   public:
-    Server(): mimeFileContent(nullptr), wwwroot{nullptr},auth{nullptr} {
+    Server():  wwwroot{nullptr}, auth{nullptr} {
       forSignals = this;
     }
 
@@ -546,9 +507,11 @@ namespace DarkHttpd {
     struct Authorizer {
       StringView key; //instead of expanding this we decode the incoming string.
       bool operator()(StringView authorization);
+
       operator bool() const {
         return key.notTrivial();
       }
+
       void operator=(char *arg) {
         //todo: check for ':' and split?
         key = arg; //todo: chase heritage and try to reduce key to StringView.
