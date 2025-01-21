@@ -279,7 +279,17 @@ namespace DarkHttpd {
     uint16_t bindport; /* or 80 if running as root */
     int max_connections = -1; /* kern.ipc.somaxconn */
     bool want_daemon = false;
-    bool syslog_enabled = false;
+
+    struct Logger {
+      bool syslog_enabled = false;
+      char *file_name = nullptr; /* NULL = no logging */
+      FILE *file = nullptr;
+
+      bool begin();
+
+      void close();
+    }log;
+
     /* If a connection is idle for timeout_secs or more, it gets closed and
          * removed from the connlist.
          */
@@ -302,7 +312,6 @@ namespace DarkHttpd {
     bool want_server_id = true;
     StringView wwwroot; /* a path name */ //argv[1]  and even if we demonize it is still present
 
-    char *logfile_name = nullptr; /* NULL = no logging */
     bool want_chroot = false;
 
     const char *index_name = "index.html";
@@ -417,8 +426,6 @@ namespace DarkHttpd {
     Server(): mimeFileContent(nullptr), wwwroot{nullptr} {
       forSignals = this;
     }
-
-    FILE *logfile = nullptr;
 
     /** time of latest event, in 3 formats. */
     struct Now {

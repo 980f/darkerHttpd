@@ -656,18 +656,17 @@ public:
   }
 
   bool errorReport() {
-    return err(-1, "Not enough arguments for %s",argv[argc-1]);
+    return err(-1, "Not enough arguments for %s", argv[argc - 1]);
   }
 
 
-  template<typename StringAssignable>  bool operator>>(StringAssignable &target) {
-
+  template<typename StringAssignable> bool operator>>(StringAssignable &target) {
     if (argi < argc) {
       if constexpr (std::is_integral<StringAssignable>::value) {
-    target = std::stoll(argv[argi++]);
-} else {
-  target = argv[argi++];
-}
+        target = std::stoll(argv[argi++]);
+      } else {
+        target = argv[argi++];
+      }
       return true;
     } else {
       return errorReport();
@@ -686,10 +685,9 @@ bool Server::parse_commandline(int argc, char *argv[]) {
   // custom_hdrs.clear();
 
   CliScanner arg(argc, argv);
-   invocationName=arg();//there is always an arg0
+  invocationName = arg(); //there is always an arg0
 
   try {
-
     if (arg.stillHas(1)) {
       wwwroot = arg();
       if (wwwroot == "--help") {
@@ -710,73 +708,73 @@ bool Server::parse_commandline(int argc, char *argv[]) {
       StringView token = arg();
       if (token == "--port") {
         arg >> bindport;
-      } else if (token ==  "--addr")  {
-        arg >> bindaddr ;
-      } else if (token ==  "--maxconn")  {
-        arg>> max_connections;
-      } else if (token ==  "--log")  {
-        arg>>        logfile_name ;
-      } else if (token ==  "--chroot")  {
+      } else if (token == "--addr") {
+        arg >> bindaddr;
+      } else if (token == "--maxconn") {
+        arg >> max_connections;
+      } else if (token == "--log") {
+        arg >> log.file_name;
+      } else if (token == "--chroot") {
         want_chroot = true;
 #if DarklySupportDaemon
-      } else if (token ==  "--daemon")  {
+      } else if (token == "--daemon") {
         want_daemon = true;
 #endif
-      } else if (token ==  "--index")  {
-        arg>>        index_name ;
-      } else if (token ==  "--no-listing")  {
+      } else if (token == "--index") {
+        arg >> index_name;
+      } else if (token == "--no-listing") {
         no_listing = true;
-      } else if (token ==  "--mimetypes")  {
-        arg>>        mimeFileName ;
-      } else if (token ==  "--default-mimetype")  {
-        arg>>        default_mimetype ;
-      } else if (token ==  "--uid")  { //username or a number.
-        arg>>        drop_uid ;
-      } else if (token ==  "--gid")  {
-        arg>>        drop_gid ;
+      } else if (token == "--mimetypes") {
+        arg >> mimeFileName;
+      } else if (token == "--default-mimetype") {
+        arg >> default_mimetype;
+      } else if (token == "--uid") { //username or a number.
+        arg >> drop_uid;
+      } else if (token == "--gid") {
+        arg >> drop_gid;
 #if DarklySupportDaemon
-      } else if (token ==  "--pidfile")  {
-        arg>>        d.pid.file_name ;
+      } else if (token == "--pidfile") {
+        arg >> d.pid.file_name;
 #endif
-      } else if (token ==  "--no-keepalive")  {
+      } else if (token == "--no-keepalive") {
         want_keepalive = false;
 #if   DarklySupportAcceptanceFilter
     } else if (token ==  "--accf")  {
       want_accf = true;
 #endif
-      } else if (token ==  "--syslog")  {
-        syslog_enabled = true;
+      } else if (token == "--syslog") {
+        log.syslog_enabled = true;
 #if DarklySupportForwarding
-      } else if (token ==  "--forward")  {
-        if (arg.stillHas(2)) {//having a syntax for a pack hostname:url would be simpler here.
-          char *host,*url;
-          arg>>host;
-          arg>>url;
+      } else if (token == "--forward") {
+        if (arg.stillHas(2)) { //having a syntax for a pack hostname:url would be simpler here.
+          char *host, *url;
+          arg >> host;
+          arg >> url;
           forward.map.add(host, url);
         } else {
           err(-1, "--forward needs two following args, host then url ");
         }
-      } else if (token ==  "--forward-all")  {
-        arg>>        forward.all_url ;
-      } else if (token ==  "--forward-https")  {
+      } else if (token == "--forward-all") {
+        arg >> forward.all_url;
+      } else if (token == "--forward-https") {
         forward.to_https = true;
 #endif
-      } else if (token ==  "--no-server-id")  {
+      } else if (token == "--no-server-id") {
         want_server_id = false;
-      } else if (token ==  "--timeout")  {
-        arg>>        timeout_secs ;
-      } else if (token ==  "--auth")  {
-        arg>>auth;//rest of parsing and checking is in operator= of Authorization.
-      } else if (token ==  "--header")  {
+      } else if (token == "--timeout") {
+        arg >> timeout_secs;
+      } else if (token == "--auth") {
+        arg >> auth; //rest of parsing and checking is in operator= of Authorization.
+      } else if (token == "--header") {
         char *header;
-        arg>>header;
-        if (strchr(header, '\n') != nullptr || strstr(header, ": ") == nullptr) {//note: this requires quoting to keep shell from seeing these as two args.
+        arg >> header;
+        if (strchr(header, '\n') != nullptr || strstr(header, ": ") == nullptr) { //note: this requires quoting to keep shell from seeing these as two args.
           err(-1, "malformed argument after --header");
         }
         custom_hdrs.push_back(header);
       }
 #ifdef HAVE_INET6
-      else if (token ==  "--ipv6")  {
+      else if (token == "--ipv6") {
         inet6 = true;
       }
 #endif
@@ -893,7 +891,7 @@ void Server::log_connection(const Connection *conn) {
   AutoString safe_user_agent;
   char dest[CLF_DATE_LEN];
 
-  if (logfile == nullptr) {
+  if (log.file == nullptr) {
     return;
   }
   if (conn->reply.http_code == 0) {
@@ -2182,7 +2180,7 @@ bool Server::DropPrivilege::validate() {
       g = getgrgid(atoi(byName));
     }
     if (g) {
-      byNumber=g->gr_gid;
+      byNumber = g->gr_gid;
       return true;
     }
   } else {
@@ -2191,11 +2189,11 @@ bool Server::DropPrivilege::validate() {
       p = getpwuid(atoi(byName));
     }
     if (p) {
-      byNumber=p->pw_uid;
+      byNumber = p->pw_uid;
       return true;
     }
   }
-  err(-1, "no such %s: `%s'", asGgroup?"gid":"uid", byName);
+  err(-1, "no such %s: `%s'", asGgroup ? "gid" : "uid", byName);
   return false;
 }
 
@@ -2228,6 +2226,25 @@ void Server::stop_running(int sig unused) {
   }
 }
 
+bool Server::Logger::begin() {
+  if (file_name == nullptr) {
+    file = stdout;
+  } else {
+    file = fopen(file_name, "ab");
+    if (file == nullptr) {
+      err(1, "opening logfile: fopen(\"%s\")", file_name);
+      return false;
+    }
+  }
+  return true;
+}
+
+void Server::Logger::close() {
+  if (file) {
+    fclose(file); //guarantees we don't lose a final message.
+  }
+}
+
 // too soon, giving me grief with deleted functions that are the main reason ostream exists.
 // std::ostream operator<<( std::ostream & lhs, const struct timeval & rhs) {
 //   return lhs << rhs.tv_sec <<'.'<<rhs.tv_usec / 10000;//todo: fixed with zero filled format for second field
@@ -2254,15 +2271,7 @@ bool Server::prepareToRun() {
   init_sockin();
 
   /* open logfile */
-  if (logfile_name == nullptr) {
-    logfile = stdout;
-  } else {
-    logfile = fopen(logfile_name, "ab");
-    if (logfile == nullptr) {
-      err(1, "opening logfile: fopen(\"%s\")", logfile_name);
-      return false;
-    }
-  }
+  log.begin();
 #if DarklySupportDaemon
   if (want_daemon) {
     d.start();
@@ -2291,7 +2300,7 @@ bool Server::prepareToRun() {
     if (drop_gid) {
       drop_gid.validate();
       gid_t list[1] = {drop_gid};
-      if (setgroups(1, list) == -1) {//todo: this seems aggressive/intrusive, I'd rather have the gid drop fail if the user is not already in that supposedly limited group.
+      if (setgroups(1, list) == -1) { //todo: this seems aggressive/intrusive, I'd rather have the gid drop fail if the user is not already in that supposedly limited group.
         err(1, "setgroups([%u])", unsigned(drop_gid));
         return false;
       }
@@ -2361,7 +2370,6 @@ void Server::Daemon::PidFiler::Remove(const char *why) {
 }
 
 bool Server::Daemon::PidFiler::file_read() {
-
   Fd::operator=(open(file_name, O_RDONLY));
   if (!seemsOk()) {
     return err(1, " after create failed");
@@ -2397,8 +2405,8 @@ void Server::Daemon::PidFiler::create() {
   // if (ftruncate(fd, 0) == -1) {
   //   Remove("ftruncate() failed");
   // }
-  lastWrote=getpid();
-  printf( "%d", lastWrote);
+  lastWrote = getpid();
+  printf("%d", lastWrote);
 }
 #endif
 
@@ -2463,9 +2471,7 @@ int Server::main(int argc, char **argv) {
     printf("Unknown exception, probably from the std lib");
     exitcode = EXIT_FAILURE;
   }
-  if (logfile) {
-    fclose(logfile); //guarantees we don't lose a final message.
-  }
+  log.close();
   reportStats();
   freeall(); //gratuitous, ending a process makes this moot, except for memory leak detector.
   return exitcode;
