@@ -29,6 +29,7 @@
 #include "darkhttpd.h"
 
 #include <addr6.h>
+#include <base64getter.h>
 #include <cheaptricks.h>
 #include <fd.h>
 #include <functional>
@@ -2401,66 +2402,6 @@ void Server::Daemon::PidFiler::create() {
 }
 #endif
 
-struct Base64Getter {
-  StringView encoded;
-  unsigned phase = 0;
-  char dregs = ~0;
-  bool inputExhausted = false;
-
-  unsigned get6() {
-    if (inputExhausted) {
-      return ~0;
-    }
-    char b64 = encoded.chop(1);
-    inputExhausted = !encoded;
-    switch (b64) {
-      case '=':
-        inputExhausted = true;
-        return ~0;
-      case '/':
-        return 63;
-      case '+':
-        return 62;
-      default:
-        if (b64 <= '9') {
-          return b64 - '0';
-        }
-        if (b64 <= 'Z') {
-          return b64 - 'A';
-        }
-        return b64 - 'a';
-    }
-  }
-
-  Base64Getter(const StringView &encoded) : encoded{encoded} {}
-
-  operator bool() const {
-    return !inputExhausted;
-  }
-
-  uint8_t operator()() {
-    unsigned acc = 0;
-    if (phase == 3) {
-      phase = 0;
-    }
-    switch (phase++) {
-      default: //appease compiler, won't ever happen.
-      case 0: //6|2
-        acc = get6() << 2;
-        dregs = get6();
-        return acc | (dregs >> 4);
-      case 1: //4|4
-        acc = dregs & 0xF << 4;
-        dregs = get6();
-        return acc | (dregs >> 4);
-      case 2: //2|6
-        acc = (dregs & 0x3) << 6;
-        dregs = get6();
-        return acc | dregs;
-    }
-  }
-};
-
 /* Returns 1 if passwords are equal, runtime is proportional to the length of
  * user_input to avoid leaking the secret's length and contents through timing
  * information.
@@ -2478,8 +2419,6 @@ bool Server::Authorizer::operator()(StringView user_input) {
 
   StringView scanner(key);
   Base64Getter base64(user_input);
-  // size_t i = 0;
-  // size_t j = 0;
   char out = 0;
 
   while (base64) {

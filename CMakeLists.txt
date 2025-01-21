@@ -16,6 +16,8 @@ add_executable(
   checkFormatArgs.h
   addr6.cpp
   addr6.h
+  base64getter.cpp
+  base64getter.h
 )
 
 target_compile_definitions(darkerhttpd PUBLIC
