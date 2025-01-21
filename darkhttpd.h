@@ -56,6 +56,7 @@
 
 #include <locale>
 #include <map>
+#include <now.h>
 
 #include <netinet/in.h>
 #include <sys/stat.h>
@@ -86,7 +87,7 @@ namespace DarkHttpd {
 #else
     in_addr_t client;
 #endif
-    time_t last_active = 0;
+    Now last_active = 0;
 
     enum {
       RECV_REQUEST, /* receiving request */
@@ -124,7 +125,7 @@ namespace DarkHttpd {
     StringView referer; //parse_field
     StringView user_agent; //parse_field
     StringView authorization; //parse_field
-    StringView if_mod_since;
+    Now if_mod_since;
 
     ByteRange range;
 
@@ -345,6 +346,10 @@ namespace DarkHttpd {
         }
       }
 
+      void put(Now &&now) {
+        put(static_cast<time_t>(now));
+      }
+
       /* list processor template magic. Add a put() variation for any type that needs to be emitted */
       template<typename First, typename... Rest> void tsv(First &&first, Rest &&... rest) {
         put(std::forward<First>(first));
@@ -361,7 +366,7 @@ namespace DarkHttpd {
          * removed from the connlist.
          */
     unsigned timeout_secs = 30;
-
+    bool want_keepalive = true;
 
     const char *default_mimetype = nullptr;
     /** file of mime mappings gets read into here.*/
@@ -375,7 +380,6 @@ namespace DarkHttpd {
     bool want_accf = false;//FreeBSD accept filter (replace runtime bitch with compile time flag and complaint when parsing command line/file
 #endif
 
-    bool want_keepalive = true;
     bool want_server_id = true;
     StringView wwwroot; /* a path name */ //argv[1]  and even if we demonize it is still present
 
@@ -421,12 +425,12 @@ namespace DarkHttpd {
 
   protected:
     Fd sockin; /* socket to accept connections from */
+    bool accepting = true; /* set to 0 to stop accept()ing */
+    volatile bool running = false; /* signal handler sets this to false */
+
     /** the entries will all be dynamically allocated */
     std::forward_list<Connection *> connections;
 
-    bool accepting = true; /* set to 0 to stop accept()ing */
-
-    volatile bool running = false; /* signal handler sets this to false */
 
     void change_root();
 
@@ -502,27 +506,8 @@ namespace DarkHttpd {
       forSignals = this;
     }
 
-    /** time of latest event, in 3 formats. */
-    struct Now {
-#define DATE_LEN 30 /* strlen("Fri, 28 Feb 2003 00:02:08 GMT")+1 */
 
-    private:
-      time_t raw = 0;
-
-    public:
-      operator time_t() const {
-        return raw;
-      }
-
-      time_t utc;
-      char image[DATE_LEN];
-
-      void refresh() {
-        raw = time(&utc); //twofer: both are set to the same value
-        //rfc11whatever format.
-        image[strftime(image, DATE_LEN, "%a, %d %b %Y %H:%M:%S GMT", gmtime(&utc))] = 0; // strftime returns number of chars it put into dest.
-      }
-    } now;
+    Now now;
 
   private:
 #if DarklySupportForwarding

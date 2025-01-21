@@ -5,8 +5,10 @@
 
 #include "stringview.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <bits/ranges_util.h>
 
 
 StringView::StringView(char *pointer, size_t length, size_t start): pointer{pointer},
@@ -26,6 +28,10 @@ StringView &StringView::operator=(char *str) {
 
 bool StringView::operator==(const char *toMatch) const {
   return strncasecmp(begin(), toMatch, length) == 0;
+}
+
+bool StringView::operator==(const StringView &toMatch) const {
+  return (strncasecmp(begin(), toMatch.begin(), std::min(length, toMatch.length)) == 0) && length == toMatch.length;
 }
 
 StringView StringView::subString(size_t start, size_t pastEnd) const {
@@ -76,7 +82,7 @@ ssize_t StringView::lookAhead(char sought) const {
 }
 
 StringView StringView::chop(size_t moveStart) {
-  StringView discard(begin(),moveStart);
+  StringView discard(begin(), moveStart);
   if (moveStart > length) {
     discard.length = length;
     start = length;
@@ -94,18 +100,27 @@ StringView StringView::cutToken(char termchar, bool orToEnd) {
     if (cutpoint == -1) {
       if (orToEnd) {
         StringView token = StringView(begin(), length); //limit new view as much as possible, no looking back in front of it.
-        start=length;//null this one, but don't much with its pointer as we may be an AutoString
+        start = length; //null this one, but don't much with its pointer as we may be an AutoString
         return token;
       } else {
-        return StringView(nullptr,0,0);
+        return StringView(nullptr, 0, 0);
       }
     } else {
       StringView token = StringView(begin(), length - cutpoint - 1); //limit new view as much as possible, no looking back in front of it.
-      chop(cutpoint + 1);//remove termchar along with what preceded it.
+      chop(cutpoint + 1); //remove termchar along with what preceded it.
       return token;
     }
   }
   return StringView(nullptr);
+}
+
+unsigned StringView::listIndex(const char *list[], unsigned countOfList) const {
+  for (unsigned i = countOfList; i-- > 0;) {
+    if (*this == list[i]) {
+      return i;
+    }
+  }
+  return ~0; //should blow things up nicely if not checked.
 }
 
 void StringView::trimTrailing(const char *trailers) {
@@ -193,10 +208,10 @@ char *StringView::find(char c) {
 }
 
 void StringView::truncateAt(char *writer) {
-  if (writer>=begin()) {
-    if (writer<end()) {
+  if (writer >= begin()) {
+    if (writer < end()) {
       *writer = '\0';
-      length = writer-begin();
+      length = writer - begin();
     }
   }
 }

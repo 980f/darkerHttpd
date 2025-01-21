@@ -32,8 +32,14 @@ struct StringView {
   /** case insensitive compare */
   bool operator==(const char *toMatch) const;
 
+  /** case insensitive compare */
+  bool operator==(const StringView& toMatch) const;
+
+  //todo:1 exact string compares, not ignoring case.
+
+
   operator char *() const {
-    return pointer;
+    return begin();
   }
 
   bool notTrivial() const {
@@ -66,6 +72,8 @@ struct StringView {
   StringView chop(size_t moveStart);
 
   StringView cutToken(char termchar, bool orToEnd);
+
+  unsigned listIndex(const char *list[], unsigned countOfList) const;
 
   /** calls @see put then adds a terminator and returns a pointer to that terminator. */
   char *cat(char *bigenough, bool honorNull) const {
@@ -109,7 +117,7 @@ struct StringView {
   long long int cutNumber();
 
   /** @wraps strchr */
-  char * find(char c);
+  char *find(char c);
 
-  void truncateAt(char * writer);
+  void truncateAt(char *writer);
 };

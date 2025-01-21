@@ -835,7 +835,7 @@ void Connection::Replier::recycle() {
   total_sent = 0;
 }
 
-Connection::Connection(Server &parent, int fd): socket(fd), service(parent), theRequest{}, method{}, hostname{nullptr}, url{nullptr}, urlParams{nullptr}, referer{nullptr}, user_agent{nullptr}, authorization{nullptr}, if_mod_since{nullptr}, is_https_redirect{false} {
+Connection::Connection(Server &parent, int fd): socket(fd), service(parent), theRequest{}, method{}, hostname{nullptr}, url{nullptr}, urlParams{nullptr}, referer{nullptr}, user_agent{nullptr}, authorization{nullptr}, is_https_redirect{false} {
   memset(&client, 0, sizeof(client));
   nonblock_socket(socket);
   state = RECV_REQUEST;
@@ -871,7 +871,7 @@ void Connection::recycle() {
  */
 void Connection::poll_check_timeout() {
   if (service.timeout_secs > 0) {
-    if (service.now - last_active >= service.timeout_secs) {
+    if (service.now >= last_active + service.timeout_secs) {
       debug("poll_check_timeout(%d) marking connection closed\n", int(socket));
       conn_closed = true;
       state = DONE;
@@ -879,15 +879,7 @@ void Connection::poll_check_timeout() {
   }
 }
 
-/* Format [when] as an RFC1123 date, stored in the specified buffer.  The same
- * buffer is returned for convenience.
- */
-#define DATE_LEN 30 /* strlen("Fri, 28 Feb 2003 00:02:08 GMT")+1 */
 
-static char *rfc1123_date(char *dest, time_t when) {
-  dest[strftime(dest, DATE_LEN, "%a, %d %b %Y %H:%M:%S GMT", gmtime(&when))] = 0; // strftime returns number of chars it put into dest.
-  return dest;
-}
 
 static char HEX_TO_DIGIT(char hex) {
   if (hex >= 'A' && hex <= 'F') {
@@ -1416,7 +1408,6 @@ public:
 
 /* Process a GET/HEAD request. */
 void Connection::process_get() {
-  char lastmod[DATE_LEN];
 
   /* make sure it's safe */
   if (!make_safe_url(url)) {
@@ -1486,11 +1477,11 @@ void Connection::process_get() {
     return;
   }
 
-  rfc1123_date(lastmod, filestat.st_mtime);
+  Now lastmod( filestat.st_mtime,true);//convert file modification time into rfc1123 standard, rather than convert if_mod_since into time_t
 
   /* check for If-Modified-Since, may not have to send */
-  if (if_mod_since.notTrivial() && strcmp(lastmod, if_mod_since) <= 0) { //original code compared for equal, making this useless. We want file mod time any time after the given
-    debug("not modified since %s\n", if_mod_since.pointer);
+  if (if_mod_since && lastmod<= if_mod_since) { //original code compared for equal, making this useless. We want file mod time any time after the given
+    debug("not modified since %s\n", if_mod_since.image);
     reply.header_only = true;
     startCommonHeader(304, "Not Modified"); //leaving off third arg leaves off ContentLength header, apparently not needed with a 304.
     endHeader();

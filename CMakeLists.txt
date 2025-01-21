@@ -20,6 +20,8 @@ add_executable(
   base64getter.h
   byterange.cpp
   byterange.h
+  now.cpp
+  now.h
 )
 
 target_compile_definitions(darkerhttpd PUBLIC
