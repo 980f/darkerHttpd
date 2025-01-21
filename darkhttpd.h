@@ -388,9 +388,6 @@ namespace DarkHttpd {
     const char *index_name = "index.html";
     bool no_listing = false;
 
-#define INVALID_UID ((uid_t) ~0)
-#define INVALID_GID ((gid_t) ~0)
-
     struct DropPrivilege {
       bool asGgroup;
       char *byName = nullptr;
@@ -431,6 +428,7 @@ namespace DarkHttpd {
     /** the entries will all be dynamically allocated */
     std::forward_list<Connection *> connections;
 
+    Now now;
 
     void change_root();
 
@@ -499,15 +497,10 @@ namespace DarkHttpd {
 
 #endif
 
-    // const char *generated_on(const char date[DATE_LEN]) const;
-
   public:
-    Server(): mimeFileContent(nullptr), wwwroot{nullptr} {
+    Server(): mimeFileContent(nullptr), wwwroot{nullptr},auth{nullptr} {
       forSignals = this;
     }
-
-
-    Now now;
 
   private:
 #if DarklySupportForwarding
@@ -551,12 +544,14 @@ namespace DarkHttpd {
 
   protected:
     struct Authorizer {
-      AutoString key; /* NULL or "Basic base64_of_password" */ //base64 expansion of a cli arg.
+      StringView key; //instead of expanding this we decode the incoming string.
       bool operator()(StringView authorization);
-
+      operator bool() const {
+        return key.notTrivial();
+      }
       void operator=(char *arg) {
         //todo: check for ':' and split?
-        key = strdup(arg); //todo: chase heritage and try to reduce key to StringView.
+        key = arg; //todo: chase heritage and try to reduce key to StringView.
       }
     } auth;
 

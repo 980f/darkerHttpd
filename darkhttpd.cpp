@@ -893,9 +893,9 @@ static char HEX_TO_DIGIT(char hex) {
 
 
 /* Decode URL by converting %XX (where XX are hexadecimal digits) to the
- * character it represents.  Don't forget to free the return value.
+ * character it represents.
  */
-static void urldecode(StringView url) {
+static void urldecode(StringView &url) {
   auto reader = url.begin();
   auto writer = url.begin();
   while (char c = *reader++) {
@@ -964,7 +964,7 @@ void Connection::startCommonHeader(int errcode, const char *errtext, off_t conte
 
 
 void Connection::catAuth() {
-  if (service.auth.key.notTrivial()) {
+  if (service.auth) {
     reply.header.fd.printf("WWW-Authenticate: Basic realm=\"User Visible Realm\"\r\n");
   }
 }
