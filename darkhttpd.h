@@ -38,6 +38,8 @@
 #endif
 #endif
 
+#include <byterange.h>
+
 #include "stringview.h"
 #include "autostring.h"
 #include "checkFormatArgs.h"
@@ -57,6 +59,7 @@
 
 #include <netinet/in.h>
 #include <sys/stat.h>
+#include <sys/syslog.h>
 
 /** build options */
 #ifndef NO_IPV6
@@ -123,41 +126,7 @@ namespace DarkHttpd {
     StringView authorization; //parse_field
     StringView if_mod_since;
 
-    //should structure this group, values come from parse_field
-    struct ByteRange {
-      struct Bound {
-        off_t number; //using signed for parsing convenience.
-        operator off_t() const {
-          return number;
-        }
-
-        off_t operator =(long long int parsed) {
-          number = parsed;
-          return number;
-        }
-
-        bool given;
-
-        void recycle() {
-          number = 0;
-          given = false;
-        }
-      };
-
-      Bound begin;
-      Bound end;
-
-      int parse(StringView headerline);
-
-      void recycle() {
-        begin.recycle();
-        end.recycle();
-      }
-
-      ByteRange() {
-        recycle();
-      }
-    } range;
+    ByteRange range;
 
     bool conn_closed = true; //move this back to connection itself.
 
@@ -169,10 +138,11 @@ namespace DarkHttpd {
         Fd fd;
         bool dont_free = false;
         size_t sent = 0;
+
         void recycle(bool andForget) {
           dont_free = false;
           sent = 0;
-          if (andForget){//suspicious fragment in the original, abandoned an open file descriptor, potentially leaking it.
+          if (andForget) { //suspicious fragment in the original, abandoned an open file descriptor, potentially leaking it.
             fd.forget(); // but it might be still open ?!
           }
           fd.close();
@@ -183,7 +153,7 @@ namespace DarkHttpd {
             fd.unlink();
           }
         }
-      } ;
+      };
 
       Block header;
 
@@ -248,7 +218,7 @@ namespace DarkHttpd {
 
     void redirect_https();
 
-    bool is_https_redirect;//todo: usage seems bonkers, need to check original code. This just indicates protocol that the client sent out, in case intervening layers stripped that info. Its only use should be on outgoing requests.
+    bool is_https_redirect; //todo: usage seems bonkers, need to check original code. This just indicates protocol that the client sent out, in case intervening layers stripped that info. Its only use should be on outgoing requests.
 
     bool parse_request();
 
@@ -288,7 +258,104 @@ namespace DarkHttpd {
       bool begin();
 
       void close();
-    }log;
+
+      // /* Should this character be logencoded?
+      //  */
+      // static bool needs_encoding(const unsigned char c) {
+      //   return ((c <= 0x1F) || (c >= 0x7F) || (c == '"'));
+      // }
+      //
+      // /* Encode string for logging.
+      //  */
+      // static void logencode(const char *src, char *dest) {
+      //   static const char hex[] = "0123456789ABCDEF";
+      //   int i, j;
+      //
+      //   for (i = j = 0; src[i] != '\0'; i++) {
+      //     if (needs_encoding((unsigned char) src[i])) {
+      //       dest[j++] = '%';
+      //       dest[j++] = hex[(src[i] >> 4) & 0xF];
+      //       dest[j++] = hex[src[i] & 0xF];
+      //     } else {
+      //       dest[j++] = src[i];
+      //     }
+      //   }
+      //   dest[j] = '\0';
+      // }
+      // template<typename Anything> void put(Anything thing);
+
+
+      void put(char &&item) {
+        if (syslog_enabled) {
+          syslog(LOG_INFO,"%c",item);
+        } else if (file) {
+          fputc(item, file);
+        }
+      }
+
+      void put(const char * &&item) {
+        if (syslog_enabled) {
+          syslog(LOG_INFO,"%s",item);
+        } else if (file) {
+          fputs(item, file);
+        }
+      }
+
+      void put(time_t &&time) {
+#define CLF_DATE_LEN 29 /* strlen("[10/Oct/2000:13:55:36 -0700]")+1 */
+          char dest[CLF_DATE_LEN];
+          tm tm;
+          localtime_r(&time, &tm);
+          if (strftime(dest, CLF_DATE_LEN, "[%d/%b/%Y:%H:%M:%S %z]", &tm) == 0) {
+            dest[0] = 0;
+          }
+          put(dest);
+
+#undef CLF_DATE_LEN
+      }
+
+      void put(Connection::HttpMethods method) {
+        switch (method) {
+          case Connection::GET:
+            put("GET");
+            break;
+          case Connection::HEAD:
+            put("HEAD");
+            break;
+          default:
+            put("Unknown");
+            break;
+        }
+      }
+
+      void put(const StringView &view) {
+        if (syslog_enabled) {
+          syslog(LOG_INFO,"%*s", int(view.length), view.begin());
+        } else if (file) {
+          fprintf(file, "%*s", int(view.length), view.begin());
+        }
+      }
+
+      /* todo: this guy might be intercepting and truncating longer int types. But we already expect to choke on 2Gig+ files so fixing this is not urgent */
+      void put(const int &number) {
+        if (syslog_enabled) {
+          syslog(LOG_INFO,"%d", number);
+        } else if (file) {
+          fprintf(file, "%d", number);
+        }
+      }
+
+      /* list processor template magic. Add a put() variation for any type that needs to be emitted */
+      template<typename First, typename... Rest> void tsv(First &&first, Rest &&... rest) {
+        put(std::forward<First>(first));
+        if constexpr (sizeof...(rest) > 0) {
+          put('\t');
+          tsv(std::forward<Rest>(rest)...);
+        } else {
+          put('\n');
+        }
+      }
+    } log;
 
     /* If a connection is idle for timeout_secs or more, it gets closed and
          * removed from the connlist.
@@ -300,7 +367,7 @@ namespace DarkHttpd {
     /** file of mime mappings gets read into here.*/
     AutoString mimeFileContent;
     /** file to load mime types map from */
-    char * mimeFileName;
+    char *mimeFileName;
 
     //todo: load only from file, not commandline. Might even drop feature.
     std::vector<const char *> custom_hdrs; //parse_commandline concatenation of argv's with formatting. Should just record their indexes and generate on sending rather than cacheing here.
@@ -322,27 +389,35 @@ namespace DarkHttpd {
 
     struct DropPrivilege {
       bool asGgroup;
-      char * byName = nullptr;
+      char *byName = nullptr;
       unsigned byNumber;
 
       bool operator !() const {
         return byName != nullptr;
       }
-      operator unsigned()const {
+
+      operator unsigned() const {
         return byNumber;
       }
+
+      const char *typeName();
+
       bool validate();
+
       void operator=(char *arg) {
         byName = arg;
         //maybe: validate()
-        byNumber = atoi(arg);//unchecked conversion
+        byNumber = atoi(arg); //unchecked conversion
       }
+
+      bool operator()();
     };
+
     DropPrivilege drop_uid{false};
     DropPrivilege drop_gid{true};
 
     /* name program was launched with, will eventually log it */
-    char * invocationName;
+    char *invocationName;
 
   protected:
     Fd sockin; /* socket to accept connections from */
@@ -398,7 +473,6 @@ namespace DarkHttpd {
        * Original was copyright (c) 2005 Pawel Jakub Dawidek <pjd@FreeBSD.org>
        */
       struct PidFiler : Fd {
-
         char *file_name = nullptr; /* NULL = no pidfile */
 
         void remove();
@@ -408,9 +482,10 @@ namespace DarkHttpd {
         bool file_read();
 
         void create();
-        pid_t lastWrote=0;
 
-        char lastRead[8];//4 meg is the largest of any OS of interest for the foreseeable future, we are not going to run this code on a super computer cluster.
+        pid_t lastWrote = 0;
+
+        char lastRead[8]; //4 meg is the largest of any OS of interest for the foreseeable future, we are not going to run this code on a super computer cluster.
       } pid;
 
       bool start();
@@ -429,7 +504,8 @@ namespace DarkHttpd {
 
     /** time of latest event, in 3 formats. */
     struct Now {
-      #define DATE_LEN 30 /* strlen("Fri, 28 Feb 2003 00:02:08 GMT")+1 */
+#define DATE_LEN 30 /* strlen("Fri, 28 Feb 2003 00:02:08 GMT")+1 */
+
     private:
       time_t raw = 0;
 
@@ -450,51 +526,52 @@ namespace DarkHttpd {
 
   private:
 #if DarklySupportForwarding
-  struct Forwarding {
-    const char *all_url = nullptr;
+    struct Forwarding {
+      const char *all_url = nullptr;
 
-    bool to_https = false;
+      bool to_https = false;
 
-    /** todo: replace with listmaker base class as linear search is more than fast enough. In fact, just do a string search after replacing cli args with file read.*/
-    struct forward_mapping : std::map<const char *, const char *> {
-      // const char *host, *target_url; /* These point at argv. */
-      void add(const char *const host, const char *const target_url) {
-        insert_or_assign(host, target_url); // # allows breakpoint on these. We need to decide whether multiples are allowed for the same host, at present that has been excluded but the orignal might have allowed for that in which case we need a map of list of string.
-      }
-
-      /** free contents, then forget them.*/
-      void purge() {
-        for (auto each: *this) {
-          free(const_cast<char *>(each.first));
-          free(const_cast<char *>(each.second));
+      /** todo: replace with listmaker base class as linear search is more than fast enough. In fact, just do a string search after replacing cli args with file read.*/
+      struct forward_mapping : std::map<const char *, const char *> {
+        // const char *host, *target_url; /* These point at argv. */
+        void add(const char *const host, const char *const target_url) {
+          insert_or_assign(host, target_url); // # allows breakpoint on these. We need to decide whether multiples are allowed for the same host, at present that has been excluded but the orignal might have allowed for that in which case we need a map of list of string.
         }
-        clear();
-      }
-    } map;
 
-    const char *operator()(StringView hostname) {
-      /* test the host against web forward options */
-      if (map.size() > 0) {
-        if (hostname.notTrivial()) {
-          // debug("host=\"%s\"\n", hostname.pointer);
-          auto forward_to = map.find(hostname);
-          if (forward_to != map.end()) {
-            return forward_to->second;
+        /** free contents, then forget them.*/
+        void purge() {
+          for (auto each: *this) {
+            free(const_cast<char *>(each.first));
+            free(const_cast<char *>(each.second));
+          }
+          clear();
+        }
+      } map;
+
+      const char *operator()(StringView hostname) {
+        /* test the host against web forward options */
+        if (map.size() > 0) {
+          if (hostname.notTrivial()) {
+            // debug("host=\"%s\"\n", hostname.pointer);
+            auto forward_to = map.find(hostname);
+            if (forward_to != map.end()) {
+              return forward_to->second;
+            }
           }
         }
+        return all_url;
       }
-      return all_url;
-    }
-  } forward;
+    } forward;
 #endif
 
   protected:
     struct Authorizer {
       AutoString key; /* NULL or "Basic base64_of_password" */ //base64 expansion of a cli arg.
       bool operator()(StringView authorization);
+
       void operator=(char *arg) {
         //todo: check for ':' and split?
-        key = strdup(arg);//todo: chase heritage and try to reduce key to StringView.
+        key = strdup(arg); //todo: chase heritage and try to reduce key to StringView.
       }
     } auth;
 
@@ -504,13 +581,12 @@ namespace DarkHttpd {
       uint64_t total_in = 0;
       uint64_t total_out = 0;
     } fyi;
-  public:
 
+  public:
     void usage(const char *argv0);
 
     bool parse_commandline(int argc, char *argv[]);
 
     int main(int argc, char **argv);
   };
-
 };

@@ -230,16 +230,6 @@ static void xclose(Fd fd) {
   }
 }
 
-// removed  strntoupper as we are quite careful to enforce nulls on the end of anything we upperify.
-/* malloc that dies if it can't allocate. */
-static void *xmalloc(const size_t size) {
-  void *ptr = malloc(size);
-  if (ptr == nullptr) {
-    err(-1, "can't allocate %zu bytes", size);
-  }
-  return ptr;
-}
-
 /* Make the specified socket non-blocking. */
 static void nonblock_socket(const int sock) {
   int flags = fcntl(sock, F_GETFL);
@@ -617,32 +607,6 @@ void Server::usage(const char *argv0) {
 #endif
 }
 
-/* @returns whether string is strictly a number.  Set num to NULL if disinterested in its value.
- */
-// static long long str_to_num(const char *str, bool *fault) {
-//   char *endptr;
-//   long long n;
-//
-//   errno = 0;
-//   n = strtoll(str, &endptr, 10);
-//   if (fault) {
-//     *fault = (*endptr!=0) || (n == LLONG_MIN && errno == ERANGE) ||(n == LLONG_MAX && errno == ERANGE);
-//   }
-//   return n;
-// }
-//
-// /* @returns a valid number or dies.
-//  * @deprecated
-//  */
-// static long long xstr_to_num(const char *str) {
-//   long long ret=~0;//something likely to blow hard if the parse fails.
-//
-//   if (!str_to_num(str, &ret)) {
-//     err(-1, "number \"%s\" is invalid", str);
-//   }
-//   return ret;
-// }
-
 class CliScanner {
 public:
   CliScanner(int argc, char **argv) : argc{argc}, argv{argv} {}
@@ -825,7 +789,7 @@ void Server::accept_connection() {
   }
 
   /* Allocate and initialize struct connection. */
-  conn = new Connection(*this, fd); // connections have defaults from the DarkHttpd that creates them.
+  conn = new Connection(*this, fd);
   connections.push_front(conn);
 
 #ifdef HAVE_INET6
@@ -837,7 +801,7 @@ void Server::accept_connection() {
     *reinterpret_cast<in_addr_t *>(&conn->client) = addrin.sin_addr.s_addr;
   }
 
-  debug("accepted connection from %s:%u (fd %d)\n", inet_ntoa(addrin.sin_addr), ntohs(addrin.sin_port), int(conn->socket));
+  debug("accepted connection from %s:%u (fd %d)\n", inet_ntoa(addrin.sin_addr), ntohs(addrin.sin_port), int(conn->socket));//CLion wrong thinks the cast on conn->socket is not needed.
 
   /* Try to read straight away rather than going through another iteration
    * of the select() loop.
@@ -845,144 +809,18 @@ void Server::accept_connection() {
   conn->poll_recv_request();
 }
 
-/* Should this character be logencoded?
- */
-static bool needs_logencoding(const unsigned char c) {
-  return ((c <= 0x1F) || (c >= 0x7F) || (c == '"'));
-}
-
-/* Encode string for logging.
- */
-static void logencode(const char *src, char *dest) {
-  static const char hex[] = "0123456789ABCDEF";
-  int i, j;
-
-  for (i = j = 0; src[i] != '\0'; i++) {
-    if (needs_logencoding((unsigned char) src[i])) {
-      dest[j++] = '%';
-      dest[j++] = hex[(src[i] >> 4) & 0xF];
-      dest[j++] = hex[src[i] & 0xF];
-    } else {
-      dest[j++] = src[i];
-    }
-  }
-  dest[j] = '\0';
-}
-
-/* Format [when] as a CLF date format, stored in the specified buffer.  The same
- * buffer is returned for convenience.
- */
-#define CLF_DATE_LEN 29 /* strlen("[10/Oct/2000:13:55:36 -0700]")+1 */
-
-static char *clf_date(char *dest, time_t when) {
-  tm tm;
-  localtime_r(&when, &tm);
-  if (strftime(dest, CLF_DATE_LEN, "[%d/%b/%Y:%H:%M:%S %z]", &tm) == 0) {
-    dest[0] = 0;
-  }
-  return dest;
-}
-
 /* Add a connection's details to the logfile. */
 void Server::log_connection(const Connection *conn) {
-  AutoString safe_method;
-  AutoString safe_url;
-  AutoString safe_referer;
-  AutoString safe_user_agent;
-  char dest[CLF_DATE_LEN];
-
   if (log.file == nullptr) {
     return;
   }
   if (conn->reply.http_code == 0) {
     return; /* invalid - died in request */
   }
-  //   if (!conn->method) {
-  //     return; /* invalid - didn't parse - maybe too long */
-  //   }
-  //
-  //   // all the _safe macros can go away if we stream with a encoding translator in the stream instead of this malloc and free and explode methodology.
-  // #define make_safe(x)                                                    \
-  //   do {                                                                  \
-  //     if (conn->x) {                                                      \
-  //       safe_## x = static_cast<char *>(xmalloc(strlen(conn->x) * 3 + 1)); \
-  //       logencode(conn->x, safe_## x);                                     \
-  //     } else {                                                            \
-  //       safe_## x = NULL;                                                  \
-  //     }                                                                   \
-  //   } while (0)
-  //
-  //   make_safe(method);
-  //   make_safe(url);
-  //   make_safe(referer);
-  //   make_safe(user_agent);
-  //
-  // #undef make_safe
-  //
-  // #define use_safe(x) safe_## x ? safe_## x.pointer : ""
-  //   if (syslog_enabled) {
-  //     syslog(LOG_INFO, "%s - - %s \"%s %s HTTP/1.1\" %d %llu \"%s\" \"%s\"\n",
-  //       get_address_text(&conn->client),
-  //       clf_date(dest, now),
-  //       use_safe(method),
-  //       use_safe(url),
-  //       conn->http_code,
-  //       llu(conn->total_sent),
-  //       use_safe(referer),
-  //       use_safe(user_agent));
-  //   } else {
-  //     fprintf(logfile, "%s - - %s \"%s %s HTTP/1.1\" %d %llu \"%s\" \"%s\"\n",
-  //       get_address_text(&conn->client),
-  //       clf_date(dest, now),
-  //       use_safe(method),
-  //       use_safe(url),
-  //       conn->http_code,
-  //       llu(conn->total_sent),
-  //       use_safe(referer),
-  //       use_safe(user_agent));
-  //     fflush(logfile);
-  //   }
-  //
-  // #undef use_safe
-}
-
-/* Parse a Range: field into range_begin and range_end.  Only handles the
- * first range if a list is given.  Sets range_{begin,end}_given to true if
- * associated part of the range is given.
- * "Range: bytes=500-999"
- * "Range: - 456 last 456
- * "Range: 789 -  from 789 to end
- */
-
-int Connection::ByteRange::parse(StringView rangeline) {
-  //todo: allow range operand type default?
-  auto prefix = rangeline.cutToken('=', false);
-  if (!prefix) {
-    return 498;
+  if (conn->method == Connection::NotMine) {
+    return; /* invalid - didn't parse - maybe too long */
   }
-  if (prefix != "bytes") {
-    return 498; //todo: error range format not supported
-  }
-  recycle(); //COA, including annoying client giving us more than one Range header
-
-  begin = rangeline.cutNumber();
-  if (begin < 0) { // e.g. -456
-    end = -take(begin);
-    end.given = true;
-  } else {
-    begin.given = true;
-    if (rangeline[0] == '-') {
-      end = rangeline.cutNumber();
-      end.given = end > 0;
-    }
-    if (begin.given && end.given) {
-      if (end < begin) {
-        return 497;
-      }
-    }
-  }
-  //an additional range is presently not supported, we should return an error response.
-  return 499; //todo: proper value
+  log.tsv(get_address_text(&conn->client), now, conn->method, conn->url, conn->reply.http_code, conn->reply.total_sent, conn->referer, conn->user_agent);
 }
 
 void Connection::Replier::recycle() {
@@ -2173,6 +2011,10 @@ void Server::Daemon::finish() {
 }
 #endif
 
+const char *Server::DropPrivilege::typeName() {
+  return asGgroup ? "gid" : "uid";
+}
+
 bool Server::DropPrivilege::validate() {
   if (asGgroup) {
     group *g = getgrnam(byName);
@@ -2193,8 +2035,31 @@ bool Server::DropPrivilege::validate() {
       return true;
     }
   }
-  err(-1, "no such %s: `%s'", asGgroup ? "gid" : "uid", byName);
+  err(-1, "no such %s: `%s'", typeName(), byName);
   return false;
+}
+
+bool Server::DropPrivilege::operator()() {
+  validate();
+  int setit = -1; //init to 'failed'
+
+  if (asGgroup) {
+    gid_t list[1] = {byNumber};
+    if (setgroups(1, list) == -1) { //todo: this seems aggressive/intrusive, I'd rather have the gid drop fail if the user is not already in that supposedly limited group.
+      err(1, "setgroups([%u])", byNumber);
+      return false;
+    }
+    setit = setgid(byNumber);
+  } else {
+    setit = setuid(byNumber);
+  }
+  if (setit == -1) {
+    err(1, "set%s(%u)", asGgroup ? "gid" : "uid", byNumber);
+    return false;
+  }
+
+  printf("set %s to %u\n", asGgroup ? "gid" : "uid", byNumber);
+  return true;
 }
 
 void Server::change_root() {
@@ -2298,25 +2163,10 @@ bool Server::prepareToRun() {
   }
   try {
     if (drop_gid) {
-      drop_gid.validate();
-      gid_t list[1] = {drop_gid};
-      if (setgroups(1, list) == -1) { //todo: this seems aggressive/intrusive, I'd rather have the gid drop fail if the user is not already in that supposedly limited group.
-        err(1, "setgroups([%u])", unsigned(drop_gid));
-        return false;
-      }
-      if (setgid(drop_gid) == -1) {
-        err(1, "setgid(%u)", unsigned(drop_gid));
-        return false;
-      }
-      printf("set gid to %u\n", unsigned(drop_gid));
+      drop_gid();
     }
     if (drop_uid) {
-      drop_uid.validate();
-      if (setuid(drop_uid) == -1) {
-        err(1, "setuid(%u)", unsigned(drop_uid));
-        return false;
-      }
-      printf("set uid to %u\n", unsigned(drop_uid));
+      drop_uid();
     }
   } catch (...) {
     err(1, "uid or gid params neither valid name nor valid id value");

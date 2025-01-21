@@ -18,6 +18,8 @@ add_executable(
   addr6.h
   base64getter.cpp
   base64getter.h
+  byterange.cpp
+  byterange.h
 )
 
 target_compile_definitions(darkerhttpd PUBLIC
