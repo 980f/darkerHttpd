@@ -41,7 +41,6 @@
 #include <byterange.h>
 
 #include "stringview.h"
-#include "autostring.h"
 #include "checkFormatArgs.h"
 #include "fd.h"
 
@@ -55,7 +54,6 @@
 #include <forward_list>
 
 #include <locale>
-#include <map>
 #include <now.h>
 
 #include <netinet/in.h>
