@@ -59,6 +59,7 @@
 #include <now.h>
 
 #include <netinet/in.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syslog.h>
 
@@ -99,7 +100,7 @@ namespace DarkHttpd {
     bool conn_closed = true;
 
     //the following should be a runtime or at least compile time option. This code doesn't support put or post so it does not receive arbitrarily large requests.
-    static constexpr size_t RequestSizeLimit = 1023; //vastly more than is needed for most GET'ing, this would only be small for a PUT and we will stream around the buffer by parsing as the content arrives and recognizing the PUT and the header boundary soon enough to do that.
+    static constexpr size_t RequestSizeLimit = 1500; //vastly more than is needed for most GET'ing, this would only be small for a PUT and we will stream around the buffer by parsing as the content arrives and recognizing the PUT and the header boundary soon enough to do that.
     char theRequest[RequestSizeLimit];
     StringView received{theRequest, 0, 0}; //bytes in.
 
@@ -142,6 +143,8 @@ namespace DarkHttpd {
             fd.unlink();
           }
         }
+
+        FILE *createTemp();
       };
 
       Block header;
@@ -329,13 +332,15 @@ namespace DarkHttpd {
     struct Mimer {
       const char *default_type = nullptr;
       /** file of mime mappings gets read into here.*/
-      AutoString fileContent;
+      StringView fileContent=nullptr;
       /** file to load mime types map from */
       char *fileName=nullptr;
 
       void start();
       const char *operator()(const char *url);
+      void finish();
 
+      bool generate;//cli request to set given file to the internal set.
     } contentType;
 
     //todo: load only from file, not commandline. Might even drop feature.
@@ -345,7 +350,7 @@ namespace DarkHttpd {
 #endif
 
     bool want_server_id = true;
-    StringView wwwroot; /* a path name */ //argv[1]  and even if we demonize it is still present
+    StringView wwwroot=nullptr; /* a path name */ //argv[1]  and even if we demonize it is still present
 
     bool want_chroot = false;
 
@@ -459,7 +464,7 @@ namespace DarkHttpd {
 #endif
 
   public:
-    Server():  wwwroot{nullptr}, auth{nullptr} {
+    Server() {
       forSignals = this;
     }
 
@@ -505,7 +510,7 @@ namespace DarkHttpd {
 
   protected:
     struct Authorizer {
-      StringView key; //instead of expanding this we decode the incoming string.
+      StringView key=nullptr; //instead of expanding this we decode the incoming string.
       bool operator()(StringView authorization);
 
       operator bool() const {
@@ -532,4 +537,8 @@ namespace DarkHttpd {
 
     int main(int argc, char **argv);
   };
+
+  inline void Server::Mimer::finish() {
+    munmap(fileContent.pointer,fileContent.length);
+  }
 };

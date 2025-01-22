@@ -6,7 +6,34 @@
 #include "fd.h"
 #include <sys/stat.h>
 #include <cstdarg>
+#include <cstring>
+#include <stdlib.h>
 using namespace DarkHttpd;
+
+int Fd::operator=(int newfd) { // NOLINT(*-unconventional-assign-operator)
+  if (fd != newfd) {
+    fd = newfd;
+    //consider caching stream here, if fd is open.
+    stream = nullptr;
+  }
+
+  return newfd;
+}
+
+int Fd::operator=(FILE *fopened) {
+  if (fopened) {
+    stream = fopened;
+    fd = fileno(stream);
+  }
+  return fd;
+}
+
+FILE *Fd::createTemp(const char *format) {
+
+  strncpy(tmpname, format, sizeof(tmpname));
+  *this=mkstemp(tmpname);
+  return getStream();
+}
 
 bool Fd::close() {
   if (seemsOk()) {

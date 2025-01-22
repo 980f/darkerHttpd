@@ -31,9 +31,11 @@
 #include <addr6.h>
 #include <base64getter.h>
 #include <cheaptricks.h>
+#include <cliscanner.h>
 #include <fd.h>
 #include <functional>
 #include <iostream>
+#include <sys/mman.h>
 
 
 static const char pkgname[] = "darkhttpd/1.16.from.git/980f";
@@ -355,22 +357,17 @@ static const char *default_extension_map = { //todo: move to class
 
 void Server::Mimer::start() {
   if (!fileName) {
-    return ;
+    return;
   }
-  auto fd = open(fileName, 0);
-  if (fd > 0) {
+
+  Fd fd(open(fileName, 0));
+  if (fd.seemsOk()) {
     struct stat filestat;
     if (fstat(fd, &filestat) == 0) {
-      if (fileContent.malloc(filestat.st_size)) { //#freed in main()
-        if (read(fd, fileContent, filestat.st_size) == filestat.st_size) {
-          //the malloc member put a null in so we should be ready to roll.
-        } else {
-          warn("File I/O issue loading mimetypes file, %s, content ignored", fileName);
-          fileContent.Free();
-        }
-      }
+      fileContent = StringView(static_cast<char *>(mmap(nullptr, filestat.st_size,PROT_READ,MAP_PRIVATE, fd, 0)), filestat.st_size);
     }
   }
+  //it is ok to let fd close, the mmap persists until process end or munmap.
 }
 
 
@@ -606,34 +603,25 @@ void Server::usage(const char *argv0) {
 #endif
 }
 
-class CliScanner {
+/** add error reporting to base commandline scanner */
+class MyCliScanner : public CliScanner {
 public:
-  CliScanner(int argc, char **argv) : argc{argc}, argv{argv} {}
-
-  bool stillHas(unsigned needed) {
-    return argi + needed < argc;
-  }
-
-  char *operator()() {
-    return argv[argi++];
-  }
-
-  bool errorReport() {
-    return err(-1, "Not enough arguments for %s", argv[argc - 1]);
-  }
+  MyCliScanner(int argc, char **argv) : CliScanner(argc, argv) {}
 
 
   template<typename StringAssignable> bool operator>>(StringAssignable &target) {
-    if (argi < argc) {
-      if constexpr (std::is_integral<StringAssignable>::value) {
-        target = std::stoll(argv[argi++]);
-      } else {
-        target = argv[argi++];
+    if (!(CliScanner(*this) >> target)) {
+      switch (errno) {
+        case EDOM:
+          return err(-1, "Not enough arguments for %s", argv[argc - 1]);
+        case ERANGE:
+          return err(-1, "Numerical value out of range for %s", argv[argc - 1]);
+        default:
+          return err(errno, "Mysterious error for %s", argv[argc - 1]);
       }
-      return true;
-    } else {
-      return errorReport();
+      return false;
     }
+    return true;
   }
 
 private:
@@ -647,7 +635,7 @@ bool Server::parse_commandline(int argc, char *argv[]) {
   bindport = getuid() ? 8080 : 80; // default depends on whether run as root.
   // custom_hdrs.clear();
 
-  CliScanner arg(argc, argv);
+  MyCliScanner arg(argc, argv);
   invocationName = arg(); //there is always an arg0
 
   try {
@@ -689,6 +677,8 @@ bool Server::parse_commandline(int argc, char *argv[]) {
         no_listing = true;
       } else if (token == "--mimetypes") {
         arg >> contentType.fileName;
+      } else if (token == "--create-mimetypes") {
+        arg >> contentType.generate;
       } else if (token == "--default-mimetype") {
         arg >> contentType.default_type;
       } else if (token == "--uid") { //username or a number.
@@ -800,7 +790,7 @@ void Server::accept_connection() {
     *reinterpret_cast<in_addr_t *>(&conn->client) = addrin.sin_addr.s_addr;
   }
 
-  debug("accepted connection from %s:%u (fd %d)\n", inet_ntoa(addrin.sin_addr), ntohs(addrin.sin_port), int(conn->socket));//CLion wrong thinks the cast on conn->socket is not needed.
+  debug("accepted connection from %s:%u (fd %d)\n", inet_ntoa(addrin.sin_addr), ntohs(addrin.sin_port), int(conn->socket)); //CLion wrong thinks the cast on conn->socket is not needed.
 
   /* Try to read straight away rather than going through another iteration
    * of the select() loop.
@@ -820,6 +810,10 @@ void Server::log_connection(const Connection *conn) {
     return; /* invalid - didn't parse - maybe too long */
   }
   log.tsv(get_address_text(&conn->client), now, conn->method, conn->url, conn->reply.http_code, conn->reply.total_sent, conn->referer, conn->user_agent);
+}
+
+FILE *Connection::Replier::Block::createTemp() {
+  return fd.createTemp("darkerhttpdXXXXXX");
 }
 
 void Connection::Replier::recycle() {
@@ -906,6 +900,8 @@ static void urldecode(StringView &url) {
 }
 
 void Connection::startHeader(const int errcode, const char *errtext) {
+  reply.header.createTemp();
+
   if (errcode > 0) {
     reply.http_code = errcode;
   }
@@ -962,7 +958,7 @@ void Connection::startCommonHeader(int errcode, const char *errtext, off_t conte
 
 void Connection::catAuth() {
   if (service.auth) {
-    reply.header.fd.printf("WWW-Authenticate: Basic realm=\"User Visible Realm\"\r\n");
+    reply.header.fd.printf("WWW-Authenticate: Basic realm=\"simple file access\"\r\n");
   }
 }
 
@@ -975,11 +971,11 @@ void Connection::catGeneratedOn(bool toReply) {
 
 void Connection::endHeader() {
   reply.header.fd.printf("\r\n");
+  reply.header.fd.close(); //todo: but we need the name so that we can pass that to sendfile.
 }
 
 void Connection::startReply(int errcode, const char *errtext) {
-  //todo: open a tempfile
-
+  reply.content.createTemp();
   reply.content.fd.printf("<!DOCTYPE html><html><head><title>%d %s</title></head><body>\n" "<h1>%s</h1>\n", errcode, errtext, errtext);
 }
 
@@ -1124,7 +1120,7 @@ bool Connection::parse_request() {
       user_agent = headerline;
       continue;
     }
-    if (headername == "Authorization") {
+    if (headername == "Authorization") { //RFC7617 requires this be a case insensitive compare.
       authorization = headerline;
       continue;
     }
@@ -1137,8 +1133,7 @@ bool Connection::parse_request() {
       continue;
     }
     if (headername == "X-Forwarded-Proto") {
-      auto proto = headerline;
-      is_https_redirect == !proto || strcasecmp(proto, "https") == 0;
+      is_https_redirect = headerline == "https"; //dropping headerline version of protocol as superfluous. http vs https are not protocol differences for the header body, only for the routing system.
       continue;
     }
     if (headername == "Connection") {
@@ -1405,7 +1400,6 @@ public:
 
 /* Process a GET/HEAD request. */
 void Connection::process_get() {
-
   /* make sure it's safe */
   if (!make_safe_url(url)) {
     error_reply(400, "Bad Request", "You requested an invalid URL.");
@@ -1420,11 +1414,11 @@ void Connection::process_get() {
 #endif
   const char *mimetype(nullptr);
   char target[FILENAME_MAX];
-  *url.put(target,true)=0;
+  *url.put(target, true) = 0;
 
   if (url.endsWith('/')) {
     /* does it end in a slash? serve up url/index_name */
-    strcat(target,service.index_name);
+    strcat(target, service.index_name);
     if (!file_exists(target)) {
       if (service.no_listing) {
         /* Return 404 instead of 403 to make --no-listing
@@ -1475,10 +1469,10 @@ void Connection::process_get() {
     return;
   }
 
-  Now lastmod( filestat.st_mtime,true);//convert file modification time into rfc1123 standard, rather than convert if_mod_since into time_t
+  Now lastmod(filestat.st_mtime, true); //convert file modification time into rfc1123 standard, rather than convert if_mod_since into time_t
 
   /* check for If-Modified-Since, may not have to send */
-  if (if_mod_since && lastmod<= if_mod_since) { //original code compared for equal, making this useless. We want file mod time any time after the given
+  if (if_mod_since && lastmod <= if_mod_since) { //original code compared for equal, making this useless. We want file mod time any time after the given
     debug("not modified since %s\n", if_mod_since.image);
     reply.header_only = true;
     startCommonHeader(304, "Not Modified"); //leaving off third arg leaves off ContentLength header, apparently not needed with a 304.
@@ -1556,16 +1550,16 @@ void Connection::process_request() {
   } else
 #endif
   /* fail if: (auth_enabled) AND (client supplied invalid credentials) */
-    if (!service.auth(authorization)) {
-      error_reply(401, "Unauthorized", "Access denied due to invalid credentials.");
-    } else if (method == GET) {
-      process_get();
-    } else if (method == HEAD) {
-      reply.header_only = true; //setting early so that process can skip steps such as just sizing a response rather than generating it.
-      process_get();
-    } else {
-      error_reply(501, "Not Implemented", "The method you specified is not implemented.");
-    }
+  if (!service.auth(authorization)) {
+    error_reply(401, "Unauthorized", "Access denied due to invalid credentials.");
+  } else if (method == GET) {
+    process_get();
+  } else if (method == HEAD) {
+    reply.header_only = true; //setting early so that process can skip steps such as just sizing a response rather than generating it.
+    process_get();
+  } else {
+    error_reply(501, "Not Implemented", "The method you specified is not implemented.");
+  }
   /* advance state */
   state = SEND_HEADER;
 }
@@ -1783,8 +1777,6 @@ void Connection::poll_send_reply() {
 
 void Connection::generate_dir_listing(const char *path, const char *decoded_url) {
   //preparing to have different listing generators, such as "system("ls") with '?'params fed to ls as its params.
-  // DirLister htmlLinkGenerator(*this);
-  // htmlLinkGenerator(path, decoded_url);
   HtmlDirLister(*this)(path, decoded_url);
 }
 

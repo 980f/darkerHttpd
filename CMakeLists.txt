@@ -24,10 +24,12 @@ add_executable(
   now.h
   safely/cppext/fastsort.cpp
   safely/cppext/fastsort.h
+  safely/system/cliscanner.cpp
+  safely/system/cliscanner.h
 )
 
 target_compile_definitions(darkerhttpd PUBLIC
-  DarklySupportForwarding=1
+  DarklySupportForwarding=0
   DarklySupportDaemon=0
   DarklySuppportAcceptanceFilters=0
 )

@@ -11,7 +11,8 @@ namespace DarkHttpd {
   protected:
     int fd = -1;
     FILE *stream = nullptr;
-
+    //this is the filename after createTemp is called, and it lingers after the file is closed.
+    char tmpname[L_tmpnam];
   public: //temporary during code construction, this is carelessly cached.
     size_t length = 0;
 
@@ -21,7 +22,7 @@ namespace DarkHttpd {
         return nullptr; //todo: or perhaps spew to stderr?? This will likely segv.
       }
       if (stream == nullptr) {
-        stream = fdopen(fd, "wb"); //using b as we must use network line endings, not the platform's idea of them
+        stream = fdopen(fd, "rwb"); //using b as we must use network line endings, not the platform's idea of them
       }
       return stream;
     }
@@ -36,11 +37,11 @@ namespace DarkHttpd {
       return fd != -1;
     }
 
-    int operator=(int newfd) { // NOLINT(*-unconventional-assign-operator)
-      fd = newfd;
-      //consider caching stream here, if fd is open.
-      return newfd;
-    }
+    int operator=(int newfd);
+
+    int operator=(FILE *fopened);
+
+    FILE *createTemp(const char *format);
 
     bool operator==(int newfd) const {
       return fd == newfd;
@@ -57,6 +58,7 @@ namespace DarkHttpd {
     /** lose track of the fd regardless of the associated file's state. Most uses seem like bugs, leaks of OS file handles.*/
     void forget() {
       fd = -1;
+      stream = nullptr;
     }
 
     /** @returns whether the fd is real and not stdin, stdout, or stderr */
@@ -83,6 +85,7 @@ namespace DarkHttpd {
     void unlink() {
       //todo:close if not closed
       close();
+      stream = nullptr;
     }
 
     off_t getLength();
