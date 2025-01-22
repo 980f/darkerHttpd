@@ -11,8 +11,6 @@ add_executable(
   stringview.h
   fd.cpp
   fd.h
-  autostring.cpp
-  autostring.h
   checkFormatArgs.h
   addr6.cpp
   addr6.h
@@ -22,10 +20,6 @@ add_executable(
   byterange.h
   now.cpp
   now.h
-  safely/cppext/fastsort.cpp
-  safely/cppext/fastsort.h
-  safely/system/cliscanner.cpp
-  safely/system/cliscanner.h
 )
 
 target_compile_definitions(darkerhttpd PUBLIC

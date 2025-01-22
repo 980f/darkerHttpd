@@ -3,7 +3,6 @@
 // Copyright (c) 2025 Andy Heilveil, (github/980f). All rights reserved.
 */
 
-
 #include "darkhttpd.h"
 
 #if DarklySupportForwarding
@@ -18,10 +17,13 @@
 
 
 int main(int argc, char *argv[]) {
-  DarkHttpd::Server server;
-  server.main(argc,argv);
-  //todo: fork, on child call server.main(argc,argv); then waitpid() on it while (p)polling() stdin, stdout.
-  //cli functions: liststats, quit, restart (files changed) in fact add file change detect to main and let it wait until all current connections complete before prodding child to reload.
+  {//wrapped so that destructor gets called before we exit, so that we can look for memory leaks.
+    DarkHttpd::Server server;
+    server.main(argc,argv);
+    //todo: implement interactive controls via fork, on child call server.main(argc,argv); then waitpid() on it while (p)polling() stdin, stdout.
+    //cli functions: liststats, quit, restart (files changed) in fact add file change detect to main and let it wait until all current connections complete before prodding child to reload.
+  }
+  //here is where memory leaks can be reported
   return 0;
 }
 
