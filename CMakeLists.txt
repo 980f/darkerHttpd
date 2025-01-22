@@ -22,6 +22,8 @@ add_executable(
   byterange.h
   now.cpp
   now.h
+  safely/cppext/fastsort.cpp
+  safely/cppext/fastsort.h
 )
 
 target_compile_definitions(darkerhttpd PUBLIC
