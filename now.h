@@ -31,6 +31,7 @@ public:
     return dest;
   }
 
+  //#this confuses compiler, too many candidates.
   // operator time_t() const {
   //   return raw;
   // }
@@ -57,6 +58,7 @@ public:
       image[0]=0;
     }
   }
+
   Now():Now(0,false){}
 
   time_t operator +(time_t other)const {
@@ -66,6 +68,15 @@ public:
   time_t operator -(time_t other)const {
     return raw - other;
   }
+
+  time_t operator +(Now other)const {
+    return raw + other.raw;
+  }
+
+  time_t operator -(Now other)const {
+    return raw - other.raw;
+  }
+
 
   static int monthFromAbbrev(const StringView & month);
 

@@ -859,12 +859,22 @@ void Connection::recycle() {
  * marked as DONE and killed off in httpd_poll().
  */
 void Connection::poll_check_timeout() {
-  if (service.timeout_secs > 0) {
-    if (service.now >= last_active + service.timeout_secs) {
-      debug("poll_check_timeout(%d) marking connection closed\n", int(socket));
-      keepalive.dieNow = true;
-      state = DONE;
-    }
+  if (keepalive.max == 0) {
+    keepalive.max = service.timeout_secs; //might still be zero.
+  }
+  if (keepalive.requested > keepalive.max) {
+    keepalive.requested = keepalive.max;
+  }
+  time_t beenAlive = service.now - last_active;
+  //order of checks is important!
+  if (keepalive.requested > beenAlive) {
+    //do nothing
+  } else if (keepalive.max > beenAlive) {
+    //still do nothing
+  } else {
+    debug("poll_check_timeout on socket:%d marking connection closed\n", int(socket));
+    keepalive.dieNow = true;
+    state = DONE;
   }
 }
 
@@ -926,8 +936,8 @@ void Connection::catKeepAlive() {
   if (keepalive.dieNow) {
     reply.header.fd.printf("Connection: close\r\n");
   } else {
-    //legacy ignored incoming Keep-alive values and passes server setting back. todo: parse and return client value for timeout and server for max.
-    reply.header.fd.printf("Keep-Alive: timeout=%d\r\n", service.timeout_secs); //Keep-Alive: timeout=5, max=997
+    //legacy ignored incoming Keep-alive values and passed server setting back.
+    reply.header.fd.printf("Keep-Alive: timeout=%d,max=%d\r\n", keepalive.requested ? keepalive.requested : service.timeout_secs, keepalive.max ? keepalive.max : service.timeout_secs); //Keep-Alive: timeout=5, max=997
   }
 }
 
@@ -1069,8 +1079,6 @@ void Connection::redirect_https() {
  * todo: inject nulls so that more str functions can be used.
  */
 bool Connection::parse_request(StringView scanner) {
-  /* parse method */
-
   auto methodToken = scanner.cutToken(' ', false);
   if (!methodToken) {
     return false; //garble or too short to process
@@ -1088,13 +1096,13 @@ bool Connection::parse_request(StringView scanner) {
     return false;
   }
 
-  /* strip out query params */
+  /* strip out query params, check for '?' before %xx so that we can accept globs and return a cat of the globbed files in a gzipped chunk. */
   urlParams = url.find('?');
   if (urlParams != nullptr) {
     *urlParams++ = '\0';
   }
 
-  /* work out path of file being requested */
+  /* canonicalize path, especially guarding against attempts to escape the local root. */
   urldecode(url);
 
   auto protocol = scanner.cutToken('\n', false);
@@ -1109,11 +1117,11 @@ bool Connection::parse_request(StringView scanner) {
       //todo:distinguish eof from end of header
       break;
     }
-    if (headername == "Referer") {
+    if (headername == "Referer") { //only used in connection log message :(
       referer = headerline;
       continue;
     }
-    if (headername == "User-Agent") {
+    if (headername == "User-Agent") { //only used in connection log message :(
       user_agent = headerline;
       continue;
     }
@@ -1125,11 +1133,11 @@ bool Connection::parse_request(StringView scanner) {
       if_mod_since = headerline;
       continue;
     }
-    if (headername == "Host") {
+    if (headername == "Host") { //seems to only be used by forwarding, we may ifdef it away soon.
       hostname = headerline;
       continue;
     }
-    if (headername == "X-Forwarded-Proto") {
+    if (headername == "X-Forwarded-Proto") { //seems to also be only for forwarding, should ifdef it away
       is_https_redirect = headerline == "https"; //dropping headerline version of protocol as superfluous. http vs https are not protocol differences for the header body, only for the routing system.
       continue;
     }
@@ -1139,7 +1147,7 @@ bool Connection::parse_request(StringView scanner) {
       //anything else is do linger. //expect another header like "Keep-Alive: timeout=5, max=200"
       continue;
     }
-    if (headername == "Keep-Alive") {
+    if (headername == "Keep-Alive") { //a header not to be confused with similar value for Connection:
       while (auto param = headerline.cutToken(',', true)) {
         auto ptoken = param.cutToken('=', false);
         if (!param) {
@@ -1161,11 +1169,11 @@ bool Connection::parse_request(StringView scanner) {
       range.parse(headerline);
     }
   } while (scanner.notTrivial());
-  //
-  // /* cmdline flag can be used to deny keep-alive */
-  // if (!service.want_keepalive) {
-  //   keepalive.dieNow = true;
-  // }
+
+  /* cmdline flag can be used to deny keep-alive */
+  if (!service.want_keepalive) {
+    keepalive.dieNow = true; //override parse.
+  }
 
   return true;
 }
