@@ -22,7 +22,7 @@ struct ByteRange {
 
     bool given;
 
-    void recycle() {
+    void clear() {
       number = 0;
       given = false;
     }
@@ -33,12 +33,12 @@ struct ByteRange {
 
   int parse(StringView headerline);
 
-  void recycle() {
-    begin.recycle();
-    end.recycle();
+  void clear() {
+    begin.clear();
+    end.clear();
   }
 
   ByteRange() {
-    recycle();
+    clear();
   }
 };

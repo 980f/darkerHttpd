@@ -98,14 +98,15 @@ StringView StringView::cutToken(char termchar, bool orToEnd) {
     if (cutpoint == -1) {
       if (orToEnd) {
         StringView token = StringView(begin(), length); //limit new view as much as possible, no looking back in front of it.
-        start = length; //null this one, but don't much with its pointer as we may be an AutoString
+        start = length; //null this one, but don't muck with its pointer as we may be an AutoString
         return token;
       } else {
         return StringView(nullptr, 0, 0);
       }
     } else {
-      StringView token = StringView(begin(), length - cutpoint - 1); //limit new view as much as possible, no looking back in front of it.
-      chop(cutpoint + 1); //remove termchar along with what preceded it.
+      StringView token = chop(cutpoint); //remove termchar along with what preceded it.
+      StringView discard=chop(1);//the termchar
+      *discard.begin()=0;//null the token.
       return token;
     }
   }

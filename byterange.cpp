@@ -25,7 +25,7 @@ int ByteRange::parse(StringView rangeline) {
   if (prefix != "bytes") {
     return 498; //todo: error range format not supported
   }
-  recycle(); //COA, including annoying client giving us more than one Range header
+  clear(); //COA, including annoying client giving us more than one Range header
 
   begin = rangeline.cutNumber();
   if (begin < 0) { // e.g. -456

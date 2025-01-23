@@ -759,13 +759,13 @@ void Server::accept_connection() {
   if (inet6) {
     sin_size = sizeof(addrin6);
     memset(&addrin6, 0, sin_size);
-    fd = accept(sockin, (sockaddr *) &addrin6, &sin_size);
+    fd = accept(sockin, reinterpret_cast<sockaddr *>(&addrin6), &sin_size);
   } else
 #endif
   {
     sin_size = sizeof(addrin);
     memset(&addrin, 0, sin_size);
-    fd = accept(sockin, (sockaddr *) &addrin, &sin_size);
+    fd = accept(sockin, reinterpret_cast<sockaddr *>(&addrin), &sin_size);
   }
 
   if (fd == -1) {
@@ -776,9 +776,11 @@ void Server::accept_connection() {
     warn("accept()");
     return;
   }
-
+  //todo: see if there is a closed connection object to use. IE pool them.
   /* Allocate and initialize struct connection. */
   conn = new Connection(*this, fd);
+  conn->clear(); //in case we pull from pool instead of malloc.
+
   connections.push_front(conn);
 
 #ifdef HAVE_INET6
@@ -792,9 +794,7 @@ void Server::accept_connection() {
 
   debug("accepted connection from %s:%u (fd %d)\n", inet_ntoa(addrin.sin_addr), ntohs(addrin.sin_port), int(conn->socket)); //CLion wrong thinks the cast on conn->socket is not needed.
 
-  /* Try to read straight away rather than going through another iteration
-   * of the select() loop.
-   */
+  /* The accept is due to reception of the start of the request, so there will be data to read */
   conn->poll_recv_request();
 }
 
@@ -816,7 +816,7 @@ FILE *Connection::Replier::Block::createTemp() {
   return fd.createTemp("darkerhttpdXXXXXX");
 }
 
-void Connection::Replier::recycle() {
+void Connection::Replier::clear() {
   header_only = false;
   http_code = 0;
 
@@ -828,7 +828,7 @@ void Connection::Replier::recycle() {
   total_sent = 0;
 }
 
-Connection::Connection(Server &parent, int fd): socket(fd), service(parent), theRequest{}, method{}, hostname{nullptr}, url{nullptr}, urlParams{nullptr}, referer{nullptr}, user_agent{nullptr}, authorization{nullptr}, is_https_redirect{false} {
+Connection::Connection(Server &parent, int fd): socket(fd), service(parent), theRequest{}, method{}, hostname{nullptr}, url{nullptr}, urlParams{nullptr}, referer{nullptr}, user_agent{nullptr}, authorization{nullptr}, is_https_redirect{false}, reply{} {
   memset(&client, 0, sizeof(client));
   nonblock_socket(socket);
   state = RECV_REQUEST;
@@ -836,14 +836,14 @@ Connection::Connection(Server &parent, int fd): socket(fd), service(parent), the
 }
 
 void Connection::clear() {
-  received.length = 0;
+  received = StringView(theRequest, sizeof(theRequest) - 1); //prepare to receive
   method = NotMine;
   url = nullptr;
   referer = nullptr;
   user_agent = nullptr;
   authorization = nullptr;
-  reply.header.clear();
-  reply.content.clear();
+  range.clear();
+  reply.clear();
 }
 
 /* Recycle a finished connection for HTTP/1.1 Keep-Alive. */
@@ -851,10 +851,7 @@ void Connection::recycle() {
   clear(); //legacy, separate heap usage clear from the rest.
   debug("free_connection(%d)\n", int(socket));
   xclose(socket);
-  range.recycle();
-  reply.recycle();
-  conn_closed = true; //todo: check original code
-
+  keepalive.dieNow = true; //todo: check original code
   state = RECV_REQUEST; /* ready for another */
 }
 
@@ -865,7 +862,7 @@ void Connection::poll_check_timeout() {
   if (service.timeout_secs > 0) {
     if (service.now >= last_active + service.timeout_secs) {
       debug("poll_check_timeout(%d) marking connection closed\n", int(socket));
-      conn_closed = true;
+      keepalive.dieNow = true;
       state = DONE;
     }
   }
@@ -926,10 +923,11 @@ void Connection::catFixed(const char *fixedText) {
 }
 
 void Connection::catKeepAlive() {
-  if (conn_closed) {
+  if (keepalive.dieNow) {
     reply.header.fd.printf("Connection: close\r\n");
   } else {
-    reply.header.fd.printf("Keep-Alive: timeout=%d\r\n", service.timeout_secs);
+    //legacy ignored incoming Keep-alive values and passes server setting back. todo: parse and return client value for timeout and server for max.
+    reply.header.fd.printf("Keep-Alive: timeout=%d\r\n", service.timeout_secs); //Keep-Alive: timeout=5, max=997
   }
 }
 
@@ -1070,9 +1068,9 @@ void Connection::redirect_https() {
 /* Parse an HTTP request like "GET /urlGoes/here HTTP/1.1" to get the method (GET), the url (/), and those fields which are of interest to this application, ignoring any that are not.
  * todo: inject nulls so that more str functions can be used.
  */
-bool Connection::parse_request() {
+bool Connection::parse_request(StringView scanner) {
   /* parse method */
-  StringView scanner = theRequest;
+
   auto methodToken = scanner.cutToken(' ', false);
   if (!methodToken) {
     return false; //garble or too short to process
@@ -1082,7 +1080,7 @@ bool Connection::parse_request() {
   } else if (methodToken == "HEAD") {
     method = HEAD;
   } else {
-    method = NotMine;
+    method = NotMine; //but we won't formally reject until we see end of header, where we can send a well formed reply
   }
 
   url = scanner.cutToken(' ', false);
@@ -1090,20 +1088,19 @@ bool Connection::parse_request() {
     return false;
   }
 
-  /* work out path of file being requested */
-  urldecode(url);
-
   /* strip out query params */
   urlParams = url.find('?');
   if (urlParams != nullptr) {
-    *urlParams++ = '\0'; //modifies url!
+    *urlParams++ = '\0';
   }
 
-  auto proto = scanner.cutToken('\n', false);
-  proto.trimTrailing(" \t\r\n");
+  /* work out path of file being requested */
+  urldecode(url);
+
+  auto protocol = scanner.cutToken('\n', false);
+  protocol.trimTrailing(" \t\r\n"); // \n  is superfluous, but I am hoping that we always use the same 'whitespace' string and can share that.
   //todo: check for http.1.
 
-  //time to parse headers, as they arrive.
   do {
     auto headerline = scanner.cutToken('\n', false);
     auto headername = headerline.cutToken(':', false);
@@ -1138,10 +1135,24 @@ bool Connection::parse_request() {
     }
     if (headername == "Connection") {
       headerline.trimTrailing(" \t\r\n");
-      if (headerline == "close") {
-        //todo: conn_closed = true;
-      } else if (headerline == "keep-alive") {
-        //todo: conn_closed = false;
+      keepalive.dieNow = headerline == "close";
+      //anything else is do linger. //expect another header like "Keep-Alive: timeout=5, max=200"
+      continue;
+    }
+    if (headername == "Keep-Alive") {
+      while (auto param = headerline.cutToken(',', true)) {
+        auto ptoken = param.cutToken('=', false);
+        if (!param) {
+          //wtf?!  Malformed value for hint parameter
+        } else {
+          if (ptoken == "timeout") {
+            keepalive.requested = atoi(param.begin());
+            continue;
+          }
+          if (ptoken == "max") {
+            keepalive.max = atoi(param.begin());
+          }
+        }
       }
       continue;
     }
@@ -1153,7 +1164,7 @@ bool Connection::parse_request() {
   //
   // /* cmdline flag can be used to deny keep-alive */
   // if (!service.want_keepalive) {
-  //   conn_closed = true;
+  //   keepalive.dieNow = true;
   // }
 
   return true;
@@ -1540,10 +1551,6 @@ void Connection::process_get() {
 void Connection::process_request() {
   service.fyi.num_requests++;
 
-  if (!parse_request()) {
-    error_reply(400, "Bad Request", "You sent a request that the server couldn't understand.");
-    return;
-  }
 #if DarklySupportForwarding
   if (service.forward.to_https && is_https_redirect) { //this seems to forward all traffic to https due to clause of "no X-forward-proto", but it replicates original source's logic.
     redirect_https();
@@ -1568,7 +1575,7 @@ void Connection::process_request() {
 void Connection::poll_recv_request() {
   // char buf[1 << 15]; //32k is excessive, refuse any request that is longer than a header+maximum filename + any options allowed with a '?' for processing a file (of which the only ones of interest are directory listing options).
   assert(state == RECV_REQUEST);
-  ssize_t recvd = recv(socket, received.begin(), sizeof(theRequest) - received.length, 0);
+  ssize_t recvd = recv(socket, received.begin(), sizeof(theRequest) - received.length, MSG_DONTWAIT); //MSG_DONTWAIT in case we are wrong about there being at least one byte of data present when a connection is accepted.
   debug("poll_recv_request(%d) got %d bytes\n", int(socket), int(recvd));
   if (recvd == -1) {
     if (errno == EAGAIN) {
@@ -1576,41 +1583,33 @@ void Connection::poll_recv_request() {
       return;
     }
     debug("recv(%d) error: %s\n", int(socket), strerror(errno));
-    conn_closed = true;
+    keepalive.dieNow = true;
     state = DONE;
     return;
   }
   if (recvd == 0) {
     return; //original asserted here, but a 0 return is legal, while rare.
   }
+  service.fyi.total_in += recvd;
   last_active = service.now;
 
-  // //from where parse ended
-  // char *lookahead = received.begin() + parsed.length;
-  //
-  // bool ok = request.cat(buf, recvd);
-  // if (!ok) {
-  //   debug("failed to append chunk to request being received");
-  //   //need to except.
-  // }
-  // auto newLength = request.length + recvd + 1;
-  // request = static_cast<char *>(xrealloc(request, newLength));
-  // memcpy(&request.pointer[request.length], buf, recvd);
-  // request.length += recvd;
-  // request.pointer[request.length] = 0;
-  // service.fyi.total_in += recvd;
-  //
-  // /* process request if we have all of it */
-  // if (request.endsWith("\n\n", 2) || request.endsWith("\r\n\r\n", 4)) {
-  //   process_request();
-  // }
-  //
-  // /* die if it's too large */
-  // if (request.length > MAX_REQUEST_LENGTH) {
-  //   default_reply(413, "Request Entity Too Large", "Your request was dropped because it was too long.");
-  //   state = SEND_HEADER;
-  // }
+  *received.begin() = 0; //make the buff into a null terminated string.
+  //restart parse with each chunk until we parse a complete chunk. Seems wasteful but since it is rare that we don't get the whole request header in the first block we are going to keep the code simple.
+  StringView chopper(theRequest, received.start); //perhaps -1?
 
+  bool readyToRoll = parse_request(chopper);
+
+  if (!readyToRoll) {
+    //todo: distinguish between not all here yet and too corrupt to process.
+    error_reply(400, "Bad Request", "You sent a request that the server couldn't understand.");
+
+    // /* die if it's too large */
+    // if (request.length > MAX_REQUEST_LENGTH) {
+    //   default_reply(413, "Request Entity Too Large", "Your request was dropped because it was too long.");
+    //   state = SEND_HEADER;
+    // }
+    return;
+  }
   /* if we've moved on to the next state, try to send right away, instead of
    * going through another iteration of the select() loop.
    */
@@ -1639,7 +1638,7 @@ void Connection::poll_send_header() {
     if (sent == -1) {
       debug("send(%d) error: %s\n", int(socket), strerror(errno));
     }
-    conn_closed = true;
+    keepalive.dieNow = true;
     state = DONE;
     return;
   }
@@ -1761,7 +1760,7 @@ void Connection::poll_send_reply() {
     } else if (sent == 0) {
       debug("send(%d) closure\n", int(socket));
     }
-    conn_closed = true;
+    keepalive.dieNow = true;
     state = DONE;
     return;
   }
@@ -1907,11 +1906,12 @@ void Server::httpd_poll() {
     /* Handling SEND_REPLY could have set the state to done. */
     if (conn->state == Connection::DONE) {
       /* clean out finished connection */
-      if (conn->conn_closed) {
+      if (conn->keepalive.dieNow) {
+        //todo: return to pool rather than immediately discarding
         connections.remove(conn);
-        conn->clear();
-      } else {
         conn->recycle();
+      } else { //keeping alive.
+        conn->clear();
       }
     }
   }

@@ -95,12 +95,17 @@ namespace DarkHttpd {
       DONE /* connection closed, need to remove from queue */
     } state = DONE; // DONE makes it harmless so it gets garbage-collected if it should, for some reason, fail to be correctly filled out.
 
-    bool conn_closed = true;
+    struct Lifetime {
+      bool dieNow = true;
+      unsigned requested = 0;
+      unsigned max=0;
+    } keepalive;
+
 
     //the following should be a runtime or at least compile time option. This code doesn't support put or post so it does not receive arbitrarily large requests.
     static constexpr size_t RequestSizeLimit = 1500; //vastly more than is needed for most GET'ing, this would only be small for a PUT and we will stream around the buffer by parsing as the content arrives and recognizing the PUT and the header boundary soon enough to do that.
-    char theRequest[RequestSizeLimit];
-    StringView received{theRequest, 0, 0}; //bytes in.
+    char theRequest[RequestSizeLimit+1/*for null terminator */];
+    StringView received{nullptr, 0, 0}; //bytes in.
 
     /* request fields */
     enum HttpMethods {
@@ -152,7 +157,7 @@ namespace DarkHttpd {
       off_t file_length = 0;
       off_t total_sent = 0;
 
-      void recycle();
+      void clear();
 
       off_t getContentLength() {
         return content.fd.getLength();
@@ -204,7 +209,7 @@ namespace DarkHttpd {
 
     void redirect_https();
 
-    bool parse_request();
+    bool parse_request(StringView scanner);
 
     void process_get();
 
