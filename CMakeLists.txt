@@ -20,6 +20,8 @@ add_executable(
   byterange.h
   now.cpp
   now.h
+  darkerror.cpp
+  darkerror.h
 )
 
 target_compile_definitions(darkerhttpd PUBLIC

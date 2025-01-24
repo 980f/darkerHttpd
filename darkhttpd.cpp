@@ -121,24 +121,6 @@ static DebugLog debug(true);
 #endif
 
 
-class DarkException : public std::exception {
-public:
-  int returncode = 0; // what would have been returned to a shell on exit.
-  /** prints to log (if enable) when thrown, before any catching */
-  // DarkException(int returncode, const char *msgf, ...) checkFargs(3, 4) : returncode{returncode} {
-  //   va_list args;
-  //   va_start(args, msgf);
-  //   debug(msgf, args);
-  //   va_end(args);
-  // }
-  //
-  DarkException(int returncode): returncode{returncode} {}
-
-  const char *what() const noexcept override {
-    return strerror(returncode);
-  }
-};
-
 
 /* This is for non-root chroot support on FreeBSD 14.0+ */
 /* Must set sysctl security.bsd.unprivileged_chroot=1 to allow this. */
@@ -197,34 +179,7 @@ template<typename Integrish> auto llu(Integrish x) {
   return static_cast<unsigned long long>(x);
 }
 
-// replaced err.h usage  with logging and throwing an exception.
-
-/* err - prints "error: format: strerror(errno)" to stderr and exit()s with
- * the given code.
- */
-static bool err(int code, const char *format, ...) checkFargs(2, 3);
-
-static bool err(int code, const char *format, ...) {
-  fprintf(stderr, "err[%d]: %s", code, code > 0 ? strerror(code) : "is not an errno.");
-  va_list va;
-  va_start(va, format);
-
-  vfprintf(stderr, format, va);
-  va_end(va);
-  throw DarkException(code);
-  return false;
-}
-
-static void warn(const char *format, ...) checkFargs(1, 2);
-
-static void warn(const char *format, ...) {
-  va_list va;
-  va_start(va, format);
-  vfprintf(stderr, format, va);
-  fprintf(stderr, ": %s\n", strerror(errno));
-  va_end(va);
-}
-
+#include "darkerror.h"
 /* close() that dies on error.  */
 static void xclose(Fd fd) {
   if (!fd.close()) {
@@ -1134,7 +1089,7 @@ bool Connection::parse_request(StringView scanner) {
       continue;
     }
     if (headername == "Host") { //seems to only be used by forwarding, we may ifdef it away soon.
-      hostname = headerline;
+      hostname = headerline;  //Host: <host>[:<port>]
       continue;
     }
     if (headername == "X-Forwarded-Proto") { //seems to also be only for forwarding, should ifdef it away
