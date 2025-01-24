@@ -37,10 +37,13 @@ namespace DarkHttpd {
       return fd != -1;
     }
 
+    //attach to new fd, losing track of file status prior to this. We might someday make this autoclase if not same fd.
     int operator=(int newfd);
 
+    /** record stream and look up its fd number. return that fd number. */
     int operator=(FILE *fopened);
 
+    /** create a temp file via mkstemp */
     FILE *createTemp(const char *format);
 
     bool operator==(int newfd) const {
@@ -55,7 +58,7 @@ namespace DarkHttpd {
     /** @returns whether close() thinks it worked , but we discard our fd value regardless of that */
     bool close();
 
-    /** lose track of the fd regardless of the associated file's state. Most uses seem like bugs, leaks of OS file handles.*/
+    /** lose track of the fd regardless of the associated file's state. Most uses seem like bugs, potential leaks of OS file handles eventually exhausting them.*/
     void forget() {
       fd = -1;
       stream = nullptr;

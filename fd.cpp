@@ -29,9 +29,8 @@ int Fd::operator=(FILE *fopened) {
 }
 
 FILE *Fd::createTemp(const char *format) {
-
   strncpy(tmpname, format, sizeof(tmpname));
-  *this=mkstemp(tmpname);
+  *this = mkstemp(tmpname);
   return getStream();
 }
 

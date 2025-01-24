@@ -306,18 +306,28 @@ static const char *default_extension_map = {
   "video/webm: webm\n"
   "video/x-msvideo: avi\n"
   "video/mp4: mp4 m4v\n"
+  "\0" //make sure that write by FD outputs a null, so we don't have to read the man page :)
 };
-
+#include <fcntlflags.h>
 void Server::Mimer::start() {
   if (!fileName) {
     return;
   }
-
-  Fd fd(open(fileName, 0));
+  Fd fd(open(fileName, O_RDONLY));
   if (fd.seemsOk()) {
     struct stat filestat;
     if (fstat(fd, &filestat) == 0) {
       fileContent = StringView(static_cast<char *>(mmap(nullptr, filestat.st_size,PROT_READ,MAP_PRIVATE, fd, 0)), filestat.st_size);
+    }
+  } else {
+    if (generate) {
+      fd=open(fileName, O_REWRITE);
+      if (fd.seemsOk()) {
+        write(fd,default_extension_map,sizeof(default_extension_map));
+      }
+      fd.close();
+      generate=false; //to guarantee no infinite loop as we are about to recurse to map in the defaults. Either that or we spec the 'generate' to terminate the app and make them relaunch it.
+      start();//
     }
   }
   //it is ok to let fd close, the mmap persists until process end or munmap.

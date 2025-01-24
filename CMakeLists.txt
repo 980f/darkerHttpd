@@ -26,6 +26,8 @@ add_executable(
   directorylisting.h
   htmldirlister.cpp
   htmldirlister.h
+  darklogger.cpp
+  darklogger.h
 )
 
 target_compile_definitions(darkerhttpd PUBLIC
