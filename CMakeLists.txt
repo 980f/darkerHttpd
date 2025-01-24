@@ -22,6 +22,10 @@ add_executable(
   now.h
   darkerror.cpp
   darkerror.h
+  directorylisting.cpp
+  directorylisting.h
+  htmldirlister.cpp
+  htmldirlister.h
 )
 
 target_compile_definitions(darkerhttpd PUBLIC

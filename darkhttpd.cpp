@@ -32,8 +32,10 @@
 #include <base64getter.h>
 #include <cheaptricks.h>
 #include <cliscanner.h>
+#include <directorylisting.h>
 #include <fd.h>
 #include <functional>
+#include <htmldirlister.h>
 #include <iostream>
 #include <sys/mman.h>
 
@@ -121,7 +123,6 @@ static DebugLog debug(true);
 #endif
 
 
-
 /* This is for non-root chroot support on FreeBSD 14.0+ */
 /* Must set sysctl security.bsd.unprivileged_chroot=1 to allow this. */
 #ifdef __FreeBSD__
@@ -175,9 +176,6 @@ static DebugLog debug(true);
 //for printf, make it easy to know which token to use by forcing the data to the largest integer supported by it.
 static_assert(sizeof(unsigned long long) >= sizeof(off_t), "inadequate ull, not large enough for an off_t");
 
-template<typename Integrish> auto llu(Integrish x) {
-  return static_cast<unsigned long long>(x);
-}
 
 #include "darkerror.h"
 /* close() that dies on error.  */
@@ -212,7 +210,7 @@ static bool make_safe_url(StringView url) {
 
   char *reader = url.begin();
   char *writer = reader;
-  // #define ends(c) ((c) == '/' || (c) == '\0')
+  //counts of special chars encountered.
   unsigned priorSlash = 1; //the leading one
   unsigned priorDot = 0;
 
@@ -222,7 +220,7 @@ static bool make_safe_url(StringView url) {
     if (c == '/') {
       if (priorDot) {}
       ++priorSlash;
-      continue; //action defered until we have seen something other than slash or dot
+      continue; //action deferred until we have seen something other than slash or dot
     }
     if (c == '.') {
       ++priorDot;
@@ -277,7 +275,7 @@ Server *Server::forSignals = nullptr; // trusting BSS zero to clear this.
  * //nope: use xdg-mime on systems which have it, don't do this as the list is much larger than what we have here with lots of local user preferences.
  * //todo: only use file, with cli options to generate one from this string.
  */
-static const char *default_extension_map = { //todo: move to class
+static const char *default_extension_map = {
   "application/json: json\n"
   "application/pdf: pdf\n"
   "application/wasm: wasm\n"
@@ -325,6 +323,9 @@ void Server::Mimer::start() {
   //it is ok to let fd close, the mmap persists until process end or munmap.
 }
 
+void Server::Mimer::finish() {
+  munmap(fileContent.pointer, fileContent.length);
+}
 
 const char *Server::Mimer::operator()(const char *url) {
   if (url) {
@@ -1089,7 +1090,7 @@ bool Connection::parse_request(StringView scanner) {
       continue;
     }
     if (headername == "Host") { //seems to only be used by forwarding, we may ifdef it away soon.
-      hostname = headerline;  //Host: <host>[:<port>]
+      hostname = headerline; //Host: <host>[:<port>]
       continue;
     }
     if (headername == "X-Forwarded-Proto") { //seems to also be only for forwarding, should ifdef it away
@@ -1137,240 +1138,6 @@ static bool file_exists(const char *path) {
   struct stat filestat;
   return stat(path, &filestat) == -1 && errno == ENOENT ? false : true;
 }
-
-class HtmlDirLister {
-  Connection &conn;
-
-
-  /* Is this an unreserved character according to
- * https://tools.ietf.org/html/rfc3986#section-2.3
- */
-  static bool is_unreserved(const unsigned char c) {
-    if (c >= 'a' && c <= 'z') {
-      return true;
-    }
-    if (c >= 'A' && c <= 'Z') {
-      return true;
-    }
-    if (c >= '0' && c <= '9') {
-      return true;
-    }
-    switch (c) {
-      case '-':
-      case '.':
-      case '_':
-      case '~':
-        return true;
-      default:
-        return false;
-    }
-  }
-
-  //apbuf was used in one place and is very mundane code. This server is not particularly swift as it is so we drop this in favor of trusting libc and the OS to be good enough at this very frequenly used feature of an OS.
-
-  /* Escape < > & ' " into HTML entities. */
-  static void append_escaped(Fd dst, const char *src) {
-    while (auto c = *src++) {
-      switch (c) {
-        case '<':
-          dst.printf("&lt;");
-          break;
-        case '>':
-          dst.printf("&gt;");
-          break;
-        case '&':
-          dst.printf("&amp;");
-          break;
-        case '\'':
-          dst.printf("&apos;");
-          break;
-        case '"':
-          dst.printf("&quot;");
-          break;
-        default:
-          dst.printf("%c", c); //todo:putc
-      }
-    }
-  }
-
-public:
-  /* Encode string to be an RFC3986-compliant URL part.
-   * Contributed by nf.
-   */
-  static void htmlencode(Fd reply_fd, char *src) {
-    static const char hex[] = "0123456789ABCDEF";
-
-    while (char c = *src++) {
-      if (!is_unreserved(c)) {
-        reply_fd.printf("\%%c%c", hex[c >> 4], hex[c & 0xF]);
-      } else {
-        reply_fd.printf("%c", c);
-      }
-    }
-  }
-
-  /** manage lifetime of libc directory lister, can live outside this namespace */
-  struct DIRwrapper {
-    DIR *raw;
-    const char *path = nullptr;
-
-    ~DIRwrapper() {
-      closedir(raw);
-    }
-
-    bool operator ()(const char *path) {
-      raw = opendir(path);
-      return raw != nullptr;
-    }
-
-    dirent *next() {
-      return readdir(raw);
-    }
-
-    void foreach(std::function<void(dirent *, const char *)> body) {
-      while (auto entry = next()) {
-        body(entry, path);
-      }
-    }
-  };
-
-  /* listing mechanism, a reworking of what stat returns for a name */
-  class DirectoryListing {
-    struct dlent {
-      char *name = nullptr; /* The strdup'd name/path of the entry.       */
-      bool is_dir = false; /* If the entry is a directory and not a file. */
-      size_t size = 0; /* The size of the entry, in bytes.            */
-      timespec mtime; /* When the file was last modified.            */
-
-      dlent(): mtime{0, 0} {}
-
-      ~dlent() {
-        free(name);
-      }
-
-      static int sortOnName(dlent *a, dlent *b) {
-        return strcmp(a->name, b->name);
-      }
-
-      //can add other standard sorts here.
-    };
-
-  public:
-    std::forward_list<dlent *> ing; //this name will make sense at point of use.
-
-    /* Make sorted list of files in a directory.  Returns number of entries, or -1
-     * if error occurs.
-     */
-    ~DirectoryListing() {
-      for (auto dlent: ing) {
-        free(dlent);
-      }
-      ing.clear();
-    }
-
-  public:
-    bool operator()(const char *path, bool includeHidden) {
-      DIRwrapper dir;
-      if (!dir(path)) {
-        return false;
-      }
-
-      dir.foreach([&](dirent *ent, const char *dirpath) {
-        char currname[FILENAME_MAX]; //workspace for extended path.
-
-        if (ent->d_name[0] == '.') {
-          if (ent->d_name[1] == 0 || ent->d_name[1] == '.' || !includeHidden) {
-            return; /* skip "." and ".." */
-          }
-        }
-
-        snprintf(currname, sizeof currname, "%s%s", dirpath, ent->d_name); //we only call this routine if we saw a '/' at the end of the path, so we don't add one here.
-        struct stat s;
-        if (stat(currname, &s) == -1) {
-          return; /* skip un-stat-able files */
-        }
-        auto repack = new dlent(); //#freed in DirectoryListing destructor
-        repack->name = strdup(ent->d_name); //if we run out of heap we get mullpointer, we don't want to kill the whole app when that happens but might want to stop the listing process.
-        repack->is_dir = S_ISDIR(s.st_mode);
-        repack->size = s.st_size;
-        repack->mtime = s.st_mtim;
-        ing.push_front(repack);
-      });
-
-      ing.sort(dlent::sortOnName);
-      return true;
-    }
-  };
-
-  HtmlDirLister(Connection &conn) : conn{conn} {}
-
-  //was generate_dir_listing
-  void operator()(const char *path, const char *decoded_url) {
-    // size_t maxlen = 3; /* There has to be ".." */
-    /** The time formatting that we use in directory listings.
-     * An example of the default is 2013-09-09 13:01, which should be compatible with xbmc/kodi. */
-    static const char *const DIR_LIST_MTIME_FORMAT = "%Y-%m-%d %R";
-    static const unsigned DIR_LIST_MTIME_SIZE = 16 + 1; /* How large the buffer will need to be. */
-    DirectoryListing list;
-    if (!list(path, true)) { /* then an opendir() failed */
-      if (errno == EACCES) {
-        conn.error_reply(403, "Forbidden", "You don't have permission to access this URL.");
-      } else if (errno == ENOENT) {
-        conn.error_reply(404, "Not Found", "The URL you requested was not found.");
-      } else {
-        conn.error_reply(500, "Internal Server Error", "Couldn't list directory: %s", strerror(errno));
-      }
-      return;
-    }
-
-    conn.startReply(200, "OK");
-
-    conn.reply.content.fd.printf("<!DOCTYPE html>\n<html>\n<head>\n<title>");
-    append_escaped(conn.reply.content.fd, decoded_url);
-    conn.reply.content.fd.printf(
-      "</title>\n"
-      "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-      "</head>\n<body>\n<h1>");
-    append_escaped(conn.reply.content.fd, decoded_url);
-    conn.reply.content.fd.printf("</h1>\n<table border=\"0\">\n");
-
-    for (auto entry: list.ing) {
-      conn.reply.content.fd.printf("<tr>td><a href=\"");
-
-      htmlencode(conn.reply.content.fd, entry->name);
-
-      if (entry->is_dir) {
-        conn.reply.content.fd.printf("/");
-      }
-      conn.reply.content.fd.printf("\">");
-      append_escaped(conn.reply.content.fd, entry->name);
-      if (entry->is_dir) {
-        conn.reply.content.fd.printf("/");
-      }
-      conn.reply.content.fd.printf("</a></td><td>");
-
-      char mtimeImage[DIR_LIST_MTIME_SIZE];
-      tm tm;
-      localtime_r(&entry->mtime.tv_sec, &tm); //local computer time? should be option between that and a tz from header.
-      strftime(mtimeImage, sizeof mtimeImage, DIR_LIST_MTIME_FORMAT, &tm);
-
-      conn.reply.content.fd.printf(mtimeImage);
-      conn.reply.content.fd.printf("</td><td>");
-      if (!entry->is_dir) {
-        conn.reply.content.fd.printf("%10llu", llu(entry->size));
-      }
-      conn.reply.content.fd.printf("</td></tr>\n");
-    }
-    conn.reply.content.fd.printf("</table>\n");
-    conn.addFooter();
-    conn.endReply();
-
-    conn.startCommonHeader(200, "OK", conn.reply.file_length);
-    conn.catFixed("Content-Type: text/html; charset=UTF-8\r\n");
-    conn.endHeader();
-  }
-};
-
 
 /* Process a GET/HEAD request. */
 void Connection::process_get() {
@@ -2216,7 +1983,9 @@ bool Server::Authorizer::operator()(StringView user_input) {
   //Strip "Basic"
   user_input.trimLeading(" \t");
   auto shouldBeBasic = user_input.cutToken(' ', false);
-
+  if (shouldBeBasic != "Basic") {
+    warn("Auth technique not supported: %s", shouldBeBasic.begin());//auth will fail to client, this message is to sysadmin.
+  }
   StringView scanner(key);
   Base64Getter base64(user_input);
   char out = 0;

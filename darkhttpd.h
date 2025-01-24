@@ -57,7 +57,6 @@
 #include <now.h>
 
 #include <netinet/in.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syslog.h>
 
@@ -541,7 +540,8 @@ namespace DarkHttpd {
     int main(int argc, char **argv);
   };
 
-  inline void Server::Mimer::finish() {
-    munmap(fileContent.pointer,fileContent.length);
+
+  template<typename Integrish> auto llu(Integrish x) {
+    return static_cast<unsigned long long>(x);
   }
 };
