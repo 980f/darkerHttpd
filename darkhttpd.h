@@ -38,8 +38,8 @@
 #endif
 #endif
 
-#include <byterange.h>
-
+#include "byterange.h"
+#include "darklogger.h"
 #include "stringview.h"
 #include "checkFormatArgs.h"
 #include "fd.h"
@@ -238,91 +238,8 @@ namespace DarkHttpd {
     int max_connections = -1; /* kern.ipc.somaxconn */
     bool want_daemon = false;
 
-    struct Logger {
-      bool syslog_enabled = false;
-      char *file_name = nullptr; /* NULL = no logging */
-      FILE *file = nullptr;
-
-      /* open the file, perhaps emit a line to make it easy to find start and stop times */
-      bool begin();
-      /* close the file, perhaps with a sign-off message */
-      void close();
-      /** each put method knows how to format its type to the output. */
-      void put(char &&item) {
-        if (syslog_enabled) {
-          syslog(LOG_INFO, "%c", item);
-        } else if (file) {
-          fputc(item, file);
-        }
-      }
-
-      void put(const char * &&item) {
-        if (syslog_enabled) {
-          syslog(LOG_INFO, "%s", item);
-        } else if (file) {
-          fputs(item, file);
-        }
-      }
-
-      void put(time_t &&time) {
-#define CLF_DATE_LEN 29 /* strlen("[10/Oct/2000:13:55:36 -0700]")+1 */
-        char dest[CLF_DATE_LEN];
-        tm tm;
-        localtime_r(&time, &tm);
-        if (strftime(dest, CLF_DATE_LEN, "[%d/%b/%Y:%H:%M:%S %z]", &tm) == 0) {
-          dest[0] = 0;
-        }
-        put(dest);
-
-#undef CLF_DATE_LEN
-      }
-
-      void put(Connection::HttpMethods method) {
-        switch (method) {
-          case Connection::GET:
-            put("GET");
-            break;
-          case Connection::HEAD:
-            put("HEAD");
-            break;
-          default:
-            put("Unknown");
-            break;
-        }
-      }
-
-      void put(const StringView &view) {
-        if (syslog_enabled) {
-          syslog(LOG_INFO, "%*s", int(view.length), view.begin());
-        } else if (file) {
-          fprintf(file, "%*s", int(view.length), view.begin());
-        }
-      }
-
-      /* todo: this guy might be intercepting and truncating longer int types. But we already expect to choke on 2Gig+ files so fixing this is not urgent */
-      void put(const int &number) {
-        if (syslog_enabled) {
-          syslog(LOG_INFO, "%d", number);
-        } else if (file) {
-          fprintf(file, "%d", number);
-        }
-      }
-
-      void put(Now &&now) {
-        put(static_cast<time_t>(now));
-      }
-
-      /* output tab separated fields and a newline. No quoting is performed unless some type makes that sensible.
-       * list processor template magic. Add a put() variation for any type that needs to be emitted */
-      template<typename First, typename... Rest> void tsv(First &&first, Rest &&... rest) {
-        put(std::forward<First>(first));
-        if constexpr (sizeof...(rest) > 0) {
-          put('\t');
-          tsv(std::forward<Rest>(rest)...);
-        } else {
-          put('\n');
-        }
-      }
+    struct ReallyDarkLogger : DarkLogger {
+      void put(Connection::HttpMethods method);
     } log;
 
     /* If a connection is idle for timeout_secs or more, it gets closed and

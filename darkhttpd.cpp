@@ -1812,24 +1812,21 @@ void Server::stop_running(int sig unused) {
   }
 }
 
-bool Server::Logger::begin() {
-  if (file_name == nullptr) {
-    file = stdout;
-  } else {
-    file = fopen(file_name, "ab");
-    if (file == nullptr) {
-      err(1, "opening logfile: fopen(\"%s\")", file_name);
-      return false;
-    }
+void Server::ReallyDarkLogger::put(Connection::HttpMethods method) {
+
+  switch (method) {
+    case Connection::GET:
+      DarkLogger::put("GET");
+      break;
+    case Connection::HEAD:
+      DarkLogger::put("HEAD");
+      break;
+    default:
+      DarkLogger::put("Unknown");
+      break;
   }
-  return true;
 }
 
-void Server::Logger::close() {
-  if (file) {
-    fclose(file); //guarantees we don't lose a final message.
-  }
-}
 
 // too soon, giving me grief with deleted functions that are the main reason ostream exists.
 // std::ostream operator<<( std::ostream & lhs, const struct timeval & rhs) {

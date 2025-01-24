@@ -1,17 +1,12 @@
-
 /**
 // Created by andyh on 1/23/25.
 // Copyright (c) 2025 Andy Heilveil, (github/980f). All rights reserved.
 */
 
 #include "darklogger.h"
-// void Logger::put(char &&item) const {
-//   if (syslog_enabled) {
-//     syslog(LOG_INFO, "%c", item);
-//   } else if (file) {
-//     fputc(item, file);
-//   }
-// }
+
+#include <darkerror.h> //just to make failure to open log file a fatal error.
+#include <sys/syslog.h>
 
 void DarkLogger::put(char item) const {
   if (syslog_enabled) {
@@ -21,7 +16,7 @@ void DarkLogger::put(char item) const {
   }
 }
 
-void DarkLogger::put(const char *&&item) const {
+void DarkLogger::put(const char *item) const {
   if (syslog_enabled) {
     syslog(LOG_INFO, "%s", item);
   } else if (file) {
@@ -29,7 +24,7 @@ void DarkLogger::put(const char *&&item) const {
   }
 }
 
-void DarkLogger::put(time_t &&time) {
+void DarkLogger::put(time_t time) {
 #define CLF_DATE_LEN 29 /* strlen("[10/Oct/2000:13:55:36 -0700]")+1 */
   char dest[CLF_DATE_LEN];
   tm tm;
@@ -42,21 +37,7 @@ void DarkLogger::put(time_t &&time) {
 #undef CLF_DATE_LEN
 }
 
-void DarkLogger::put(DarkHttpd::Connection::HttpMethods method) {
-  switch (method) {
-    case DarkHttpd::Connection::GET:
-      put("GET");
-      break;
-    case DarkHttpd::Connection::HEAD:
-      put("HEAD");
-      break;
-    default:
-      put("Unknown");
-      break;
-  }
-}
-
-void DarkLogger::put(const StringView &view) const {
+void DarkLogger::put(StringView view) const {
   if (syslog_enabled) {
     syslog(LOG_INFO, "%*s", int(view.length), view.begin());
   } else if (file) {
@@ -64,10 +45,33 @@ void DarkLogger::put(const StringView &view) const {
   }
 }
 
-void DarkLogger::put(const int &number) const {
+void DarkLogger::put(int number) const {
   if (syslog_enabled) {
     syslog(LOG_INFO, "%d", number);
   } else if (file) {
     fprintf(file, "%d", number);
+  }
+}
+
+void DarkLogger::put(Now now) {
+  put(static_cast<time_t>(now));
+}
+
+bool DarkLogger::begin() {
+  if (file_name == nullptr) {
+    file = stdout;
+  } else {
+    file = fopen(file_name, "ab");
+    if (file == nullptr) {
+      DarkHttpd::err(1, "opening logfile: fopen(\"%s\")", file_name);
+      return false;
+    }
+  }
+  return true;
+}
+
+void DarkLogger::close() {
+  if (file) {
+    fclose(file); //guarantees we don't lose a final message.
   }
 }
