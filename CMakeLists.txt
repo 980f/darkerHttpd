@@ -28,6 +28,10 @@ add_executable(
   htmldirlister.h
   darklogger.cpp
   darklogger.h
+  mimer.cpp
+  mimer.h
+  dropprivilege.cpp
+  dropprivilege.h
 )
 
 target_compile_definitions(darkerhttpd PUBLIC

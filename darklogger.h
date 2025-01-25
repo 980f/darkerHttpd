@@ -8,7 +8,6 @@
 #include <utility>
 
 #include "now.h"
-// #include "darkhttpd.h"
 
 struct DarkLogger {
   bool syslog_enabled = false;

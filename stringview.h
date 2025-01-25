@@ -14,6 +14,8 @@ struct StringView {
   size_t length = 0;
   size_t start = 0;
 
+  StringView() = default;
+
   StringView(char *pointer, size_t length = ~0, size_t start = 0);
 
   StringView(char *begin, char *pastEnd): pointer{begin}, length(pastEnd > begin ? pastEnd - begin : 0) {}

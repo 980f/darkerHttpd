@@ -1,4 +1,3 @@
-
 /**
 // Created by andyh on 1/21/25.
 // Copyright (c) 2025 Andy Heilveil, (github/980f). All rights reserved.
@@ -45,4 +44,39 @@ int ByteRange::parse(StringView rangeline) {
   }
   //an additional range is presently not supported, we should return an error response.
   return 499; //todo: proper value
+}
+
+ByteRange ByteRange::canonical(__off_t st_size) {
+  ByteRange resolved;
+  resolved.begin.given = resolved.end.given = true;//used to signal failures or success.
+  if (begin.given) {
+    //was pointless to check range_end_given after checking begin, we never set the latter unless we have set the former
+    if (end.given) {
+      /* 100-200 */
+      resolved.begin = begin;
+      resolved.end = end;
+
+      /* clamp end to filestat.st_size-1 */
+      if (resolved.end > (st_size - 1)) {
+        resolved.end = st_size - 1;
+      }
+    } else if (begin.given && !end.given) {
+      /* 100- :: yields 100 to end */
+      resolved.begin = begin;
+      resolved.end = st_size - 1;
+    } else if (!begin.given && end.given) {
+      /* -200 :: yields last 200 */
+      resolved.end = st_size - 1;
+      resolved.begin = resolved.end - end + 1;
+
+      /* clamp start */
+      if (resolved.begin < 0) {
+        resolved.begin = 0;
+      }
+    } else {
+      resolved.begin.given = resolved.end.given = false;
+      resolved.begin = resolved.end = ~0;
+    }
+  }
+  return resolved;
 }

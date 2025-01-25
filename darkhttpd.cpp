@@ -28,17 +28,13 @@
 
 #include "darkhttpd.h"
 
-#include <addr6.h>
-#include <base64getter.h>
+#include "addr6.h"
+#include "base64getter.h"
 #include <cheaptricks.h>
-#include <cliscanner.h>
-#include <directorylisting.h>
-#include <fd.h>
-#include <functional>
-#include <htmldirlister.h>
-#include <iostream>
-#include <sys/mman.h>
-
+#include "cliscanner.h"
+#include "directorylisting.h"
+#include "fd.h"
+#include "htmldirlister.h"
 
 static const char pkgname[] = "darkhttpd/1.16.from.git/980f";
 static const char copyright[] = "copyright (c) 2003-2024 Emil Mikulic"
@@ -48,38 +44,33 @@ static const char copyright[] = "copyright (c) 2003-2024 Emil Mikulic"
 
 #define _FILE_OFFSET_BITS 64 /* stat() files bigger than 2GB */
 #include <sys/sendfile.h>
+//the above and below imply that I garbled something from the original source.
+// #ifdef __sun__
+// #include <sys/sendfile.h>
+// #endif
 
-#ifdef __sun__
-#include <sys/sendfile.h>
-#endif
 static ssize_t send_from_file(int s, int fd, off_t ofs, size_t size);
 
 #include <arpa/inet.h>
 #include <cassert>
 #include <cctype>
 #include <cerrno>
-#include <climits>
+
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdarg>
 #include <cstring>
 #include <ctime>
-#include <dirent.h>
-#include <fcntl.h>
-#include <grp.h>
-// #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <pwd.h>
-#include <sys/param.h>
-#include <sys/resource.h>
+// #include <sys/param.h>
+#include <sys/resource.h>  //used by reportstats
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#include <syslog.h>
 #include <unistd.h>
-#include <wait.h>
+#include <wait.h>  //used by one of the conditionally compiled blocks, do not remove. TODO: find which conditional flag isinvolved.
 using namespace DarkHttpd;
 
 class DebugLog {
@@ -177,7 +168,7 @@ static DebugLog debug(true);
 static_assert(sizeof(unsigned long long) >= sizeof(off_t), "inadequate ull, not large enough for an off_t");
 
 
-#include "darkerror.h"
+#include "darkerror.h" //err function.
 /* close() that dies on error.  */
 static void xclose(Fd fd) {
   if (!fd.close()) {
@@ -204,11 +195,12 @@ static void nonblock_socket(const int sock) {
  */
 static bool make_safe_url(StringView url) {
   /* URLs not starting with a slash are illegal. */
-  if (*url != '/') {
+
+  char *reader = url.begin();
+  if (*reader != '/') {
     return false;
   }
 
-  char *reader = url.begin();
   char *writer = reader;
   //counts of special chars encountered.
   unsigned priorSlash = 1; //the leading one
@@ -271,94 +263,6 @@ static bool make_safe_url(StringView url) {
 //will go away with proper signal hooking:
 Server *Server::forSignals = nullptr; // trusting BSS zero to clear this.
 
-/* Default mimetype mappings
- * //nope: use xdg-mime on systems which have it, don't do this as the list is much larger than what we have here with lots of local user preferences.
- * //todo: only use file, with cli options to generate one from this string.
- */
-static const char *default_extension_map = {
-  "application/json: json\n"
-  "application/pdf: pdf\n"
-  "application/wasm: wasm\n"
-  "application/xml: xsl xml\n"
-  "application/xml-dtd: dtd\n"
-  "application/xslt+xml: xslt\n"
-  "application/zip: zip\n"
-  "audio/flac: flac\n"
-  "audio/mpeg: mp2 mp3 mpga\n"
-  "audio/ogg: ogg opus oga spx\n"
-  "audio/wav: wav\n"
-  "audio/x-m4a: m4a\n"
-  "font/woff: woff\n"
-  "font/woff2: woff2\n"
-  "image/apng: apng\n"
-  "image/avif: avif\n"
-  "image/gif: gif\n"
-  "image/jpeg: jpeg jpe jpg\n"
-  "image/png: png\n"
-  "image/svg+xml: svg\n"
-  "image/webp: webp\n"
-  "text/css: css\n"
-  "text/html: html htm\n"
-  "text/javascript: js\n"
-  "text/plain: txt asc\n"
-  "video/mpeg: mpeg mpe mpg\n"
-  "video/quicktime: qt mov\n"
-  "video/webm: webm\n"
-  "video/x-msvideo: avi\n"
-  "video/mp4: mp4 m4v\n"
-  "\0" //make sure that write by FD outputs a null, so we don't have to read the man page :)
-};
-#include <fcntlflags.h>
-void Server::Mimer::start() {
-  if (!fileName) {
-    return;
-  }
-  Fd fd(open(fileName, O_RDONLY));
-  if (fd.seemsOk()) {
-    struct stat filestat;
-    if (fstat(fd, &filestat) == 0) {
-      fileContent = StringView(static_cast<char *>(mmap(nullptr, filestat.st_size,PROT_READ,MAP_PRIVATE, fd, 0)), filestat.st_size);
-    }
-  } else {
-    if (generate) {
-      fd=open(fileName, O_REWRITE);
-      if (fd.seemsOk()) {
-        write(fd,default_extension_map,sizeof(default_extension_map));
-      }
-      fd.close();
-      generate=false; //to guarantee no infinite loop as we are about to recurse to map in the defaults. Either that or we spec the 'generate' to terminate the app and make them relaunch it.
-      start();//
-    }
-  }
-  //it is ok to let fd close, the mmap persists until process end or munmap.
-}
-
-void Server::Mimer::finish() {
-  munmap(fileContent.pointer, fileContent.length);
-}
-
-const char *Server::Mimer::operator()(const char *url) {
-  if (url) {
-    if (auto period = strrchr(url, '.')) {
-      StringView extension = const_cast<char *>(++period);
-      StringView pool = fileContent ? fileContent : StringView(const_cast<char *>(default_extension_map)); //the const_cast seems dangerous, but we will get a segv if we screw up, we will not get a silent bug.
-      ssize_t foundAt = pool.findLast(extension);
-      if (foundAt >= 0) {
-        //todo: idiot check that this extension is not in the middle of any other extension nor inside a mimetype
-        auto mimeEnd = pool.lookBack(foundAt, ':');
-        if (mimeEnd) {
-          auto mimeStart = pool.lookBack(mimeEnd, '\n');
-          if (!mimeStart) {
-            mimeStart = 0;
-          }
-          return pool.subString(mimeStart, mimeEnd);
-        }
-      }
-    }
-  }
-  /* no period found in the string or extension not found in map */
-  return default_type ? default_type : "application/octet-stream";
-}
 
 const char *Server::get_address_text(const void *addr) const {
 #ifdef HAVE_INET6
@@ -520,10 +424,12 @@ void Server::usage(const char *argv0) {
     index_name);
   printf("\t--no-listing\n"
     "\t\tDo not serve listing if directory is requested.\n\n");
+
   printf("\t--mimetypes filename (optional)\n"
     "\t\tParses specified file for extension-MIME associations.\n\n");
   printf("\t--default-mimetype string (optional, default: %s)\n"
     "\t\tFiles with unknown extensions are served as this mimetype.\n\n", contentType.default_type);
+
   printf("\t--uid uid/uname, --gid gid/gname (default: don't privdrop)\n"
     "\t\tDrops privileges to given uid:gid after initialization.\n\n");
   printf("\t--chroot (default: don't chroot)\n"
@@ -745,8 +651,7 @@ void Server::accept_connection() {
   //todo: see if there is a closed connection object to use. IE pool them.
   /* Allocate and initialize struct connection. */
   conn = new Connection(*this, fd);
-  conn->clear(); //in case we pull from pool instead of malloc.
-
+  // conn->clear(); //in case we someday pull from pool instead of malloc.
   connections.push_front(conn);
 
 #ifdef HAVE_INET6
@@ -772,10 +677,19 @@ void Server::log_connection(const Connection *conn) {
   if (conn->reply.http_code == 0) {
     return; /* invalid - died in request */
   }
-  if (conn->method == Connection::NotMine) {
+  if (conn->rq.method == Connection::Request::NotMine) {
     return; /* invalid - didn't parse - maybe too long */
   }
-  log.tsv(get_address_text(&conn->client), now, conn->method, conn->url, conn->reply.http_code, conn->reply.total_sent, conn->referer, conn->user_agent);
+  log.tsv(get_address_text(&conn->client), now, conn->rq.method, conn->rq.url, conn->reply.http_code, conn->reply.total_sent, conn->rq.referer, conn->rq.user_agent);
+}
+
+void Connection::Replier::Block::recycle(bool andForget) {
+  dont_free = false;
+  sent = 0;
+  if (andForget) { //suspicious fragment in the original, abandoned an open file descriptor, potentially leaking it.
+    fd.forget(); // but it might be still open ?!
+  }
+  fd.close();
 }
 
 FILE *Connection::Replier::Block::createTemp() {
@@ -794,21 +708,51 @@ void Connection::Replier::clear() {
   total_sent = 0;
 }
 
-Connection::Connection(Server &parent, int fd): socket(fd), service(parent), theRequest{}, method{}, hostname{nullptr}, url{nullptr}, urlParams{nullptr}, referer{nullptr}, user_agent{nullptr}, authorization{nullptr}, is_https_redirect{false}, reply{} {
+Connection::Connection(Server &parent, int fd): socket(fd), service(parent), rq(service.timeout_secs), reply{} {
   memset(&client, 0, sizeof(client));
   nonblock_socket(socket);
-  state = RECV_REQUEST;
   last_active = service.now;
+  state = RECV_REQUEST;
 }
 
-void Connection::clear() {
+bool Connection::Request::Lifetime::timeToDie(time_t beenAlive) {
+  if (max == 0) {
+    max = cli_timeout; //might still be zero.
+  }
+  if (requested > max) {
+    requested = max;
+  }
+
+  //order of checks is important!
+  if (requested > beenAlive) {
+    //do nothing
+  } else if (max > beenAlive) {
+    //still do nothing
+  } else {
+    // debug("poll_check_timeout on socket:%d marking connection closed\n", int(socket));
+    dieNow = true;
+    return true;
+    // state = DONE;
+  }
+  return false;
+}
+
+void Connection::Request::clear() {
   received = StringView(theRequest, sizeof(theRequest) - 1); //prepare to receive
-  method = NotMine;
+  method = Request::NotMine;
   url = nullptr;
   referer = nullptr;
   user_agent = nullptr;
   authorization = nullptr;
   range.clear();
+}
+
+Connection::Request::Request(unsigned &cli_timeout): keepalive(cli_timeout) {
+  clear();
+}
+
+void Connection::clear() {
+  rq.clear();
   reply.clear();
 }
 
@@ -817,7 +761,7 @@ void Connection::recycle() {
   clear(); //legacy, separate heap usage clear from the rest.
   debug("free_connection(%d)\n", int(socket));
   xclose(socket);
-  keepalive.dieNow = true; //todo: check original code
+  rq.keepalive.dieNow = true; //todo: check original code
   state = RECV_REQUEST; /* ready for another */
 }
 
@@ -825,21 +769,8 @@ void Connection::recycle() {
  * marked as DONE and killed off in httpd_poll().
  */
 void Connection::poll_check_timeout() {
-  if (keepalive.max == 0) {
-    keepalive.max = service.timeout_secs; //might still be zero.
-  }
-  if (keepalive.requested > keepalive.max) {
-    keepalive.requested = keepalive.max;
-  }
-  time_t beenAlive = service.now - last_active;
-  //order of checks is important!
-  if (keepalive.requested > beenAlive) {
-    //do nothing
-  } else if (keepalive.max > beenAlive) {
-    //still do nothing
-  } else {
+  if (rq.keepalive.timeToDie(service.now - last_active)) {
     debug("poll_check_timeout on socket:%d marking connection closed\n", int(socket));
-    keepalive.dieNow = true;
     state = DONE;
   }
 }
@@ -899,11 +830,11 @@ void Connection::catFixed(const char *fixedText) {
 }
 
 void Connection::catKeepAlive() {
-  if (keepalive.dieNow) {
+  if (rq.keepalive.dieNow) {
     reply.header.fd.printf("Connection: close\r\n");
   } else {
     //legacy ignored incoming Keep-alive values and passed server setting back.
-    reply.header.fd.printf("Keep-Alive: timeout=%d,max=%d\r\n", keepalive.requested ? keepalive.requested : service.timeout_secs, keepalive.max ? keepalive.max : service.timeout_secs); //Keep-Alive: timeout=5, max=997
+    reply.header.fd.printf("Keep-Alive: timeout=%d,max=%d\r\n", rq.keepalive.requested ? rq.keepalive.requested : service.timeout_secs, rq.keepalive.max ? rq.keepalive.max : service.timeout_secs); //Keep-Alive: timeout=5, max=997
   }
 }
 
@@ -917,22 +848,22 @@ void Connection::catContentLength(off_t off) {
   reply.header.fd.printf("Content-Length: %llu\r\n", llu(off));
 }
 
-void Connection::startCommonHeader(int errcode, const char *errtext, off_t contentLenght = ~0UL) {
+void Connection::startCommonHeader(int errcode, const char *errtext, off_t contentLength = ~0UL) {
   startHeader(errcode, errtext);
   catDate();
   catServer();
   catFixed("Accept-Ranges: bytes\r\n");
   catKeepAlive();
   catCustomHeaders();
-  if (~contentLenght != 0) {
-    catContentLength(contentLenght);
+  if (~contentLength != 0) {
+    catContentLength(contentLength);
   }
 }
 
 
 void Connection::catAuth() {
   if (service.auth) {
-    reply.header.fd.printf("WWW-Authenticate: Basic realm=\"simple file access\"\r\n");
+    reply.header.fd.printf("WWW-Authenticate: Basic realm=\"simple file access\"\r\n");//todo:1 make realm text configurable, a cli in fact since the user might want it to reflect which wwwroot is in use.
   }
 }
 
@@ -1025,26 +956,26 @@ void Connection::redirect(const char *proto, const char *hostname, const char *u
 
 void Connection::redirect_https() {
   /* work out path of file being requested */
-  urldecode(url);
+  urldecode(rq.url);
 
   /* make sure it's safe */
-  if (!make_safe_url(url)) {
+  if (!make_safe_url(rq.url)) {
     error_reply(400, "Bad Request", "You requested an invalid URL.");
     return;
   }
 
-  if (!hostname) {
+  if (!rq.hostname) {
     error_reply(400, "Bad Request", "Missing 'Host' header.");
     return;
   }
-  redirect("https://", hostname, url);
+  redirect("https://", rq.hostname, rq.url);
 }
 
 
 /* Parse an HTTP request like "GET /urlGoes/here HTTP/1.1" to get the method (GET), the url (/), and those fields which are of interest to this application, ignoring any that are not.
  * todo: inject nulls so that more str functions can be used.
  */
-bool Connection::parse_request(StringView scanner) {
+bool Connection::Request::parse(StringView scanner) {
   auto methodToken = scanner.cutToken(' ', false);
   if (!methodToken) {
     return false; //garble or too short to process
@@ -1136,12 +1067,11 @@ bool Connection::parse_request(StringView scanner) {
     }
   } while (scanner.notTrivial());
 
-  /* cmdline flag can be used to deny keep-alive */
-  if (!service.want_keepalive) {
-    keepalive.dieNow = true; //override parse.
-  }
-
   return true;
+}
+
+ssize_t Connection::Request::receive(int socket) {
+  return recv(socket, received.begin(), sizeof(theRequest) - received.length, MSG_DONTWAIT); //MSG_DONTWAIT in case we are wrong about there being at least one byte of data present when a connection is
 }
 
 static bool file_exists(const char *path) {
@@ -1152,7 +1082,7 @@ static bool file_exists(const char *path) {
 /* Process a GET/HEAD request. */
 void Connection::process_get() {
   /* make sure it's safe */
-  if (!make_safe_url(url)) {
+  if (!make_safe_url(rq.url)) {
     error_reply(400, "Bad Request", "You requested an invalid URL.");
     return;
   }
@@ -1165,9 +1095,9 @@ void Connection::process_get() {
 #endif
   const char *mimetype(nullptr);
   char target[FILENAME_MAX];
-  *url.put(target, true) = 0;
+  *rq.url.put(target, true) = 0;
 
-  if (url.endsWith('/')) {
+  if (rq.url.endsWith('/')) {
     /* does it end in a slash? serve up url/index_name */
     strcat(target, service.index_name);
     if (!file_exists(target)) {
@@ -1179,16 +1109,16 @@ void Connection::process_get() {
         error_reply(404, "Not Found", "The URL you requested was not found.");
         return;
       }
-      generate_dir_listing(url, url); //todo: modify this to generate a content file, swapping out the file name and proceding in this module to get it sent.
+      generate_dir_listing(rq.url, rq.url); //todo: modify this to generate a content file, swapping out the file name and proceding in this module to get it sent.
       return;
     }
     mimetype = service.contentType(service.index_name);
   } else {
     /* points to a file */
-    mimetype = service.contentType(url);
+    mimetype = service.contentType(rq.url);
   }
 
-  debug("url=\"%s\", target=\"%s\", content-type=\"%s\"\n", url.begin(), target, mimetype);
+  debug("url=\"%s\", target=\"%s\", content-type=\"%s\"\n", rq.url.begin(), target, mimetype);
 
   /* open file */
   reply.content.fd = open(target, O_RDONLY | O_NONBLOCK);
@@ -1213,7 +1143,7 @@ void Connection::process_get() {
 
   /* make sure it's a regular file */
   if (S_ISDIR(filestat.st_mode)) {
-    redirect(nullptr, "/", url); //todo:  probably should be same args as other redirect.
+    redirect(nullptr, "/", rq.url); //todo:  probably should be same args as other redirect.
     return;
   } else if (!S_ISREG(filestat.st_mode)) {
     error_reply(403, "Forbidden", "Not a regular file.");
@@ -1223,65 +1153,38 @@ void Connection::process_get() {
   Now lastmod(filestat.st_mtime, true); //convert file modification time into rfc1123 standard, rather than convert if_mod_since into time_t
 
   /* check for If-Modified-Since, may not have to send */
-  if (if_mod_since && lastmod <= if_mod_since) { //original code compared for equal, making this useless. We want file mod time any time after the given
-    debug("not modified since %s\n", if_mod_since.image);
+  if (rq.if_mod_since && lastmod <= rq.if_mod_since) { //original code compared for equal, making this useless. We want file mod time any time after the given
+    debug("not modified since %s\n", rq.if_mod_since.image);
     reply.header_only = true;
     startCommonHeader(304, "Not Modified"); //leaving off third arg leaves off ContentLength header, apparently not needed with a 304.
     endHeader();
     return;
   }
 
-  if (range.begin.given) { //was pointless to check range_end_given after checking begin, we never set the latter unless we have set the former
-    off_t from = ~0; //init to ridiculous value ...
-    off_t to = ~0; //... so that things will blow up if we don't actually set the fields
-
-    if (range.end.given) {
-      /* 100-200 */
-      from = range.begin;
-      to = range.end;
-
-      /* clamp end to filestat.st_size-1 */
-      if (to > (filestat.st_size - 1)) {
-        to = filestat.st_size - 1;
-      }
-    } else if (range.begin.given && !range.end.given) {
-      /* 100- :: yields 100 to end */
-      from = range.begin;
-      to = filestat.st_size - 1;
-    } else if (!range.begin.given && range.end.given) {
-      /* -200 :: yields last 200 */
-      to = filestat.st_size - 1;
-      from = to - range.end + 1;
-
-      /* clamp start */
-      if (from < 0) {
-        from = 0;
-      }
-    } else {
-      err(-1, "internal error - from/to mismatch");
-    }
-
-    if (from >= filestat.st_size) {
-      error_reply(416, "Requested Range Not Satisfiable", "You requested a range outside of the file.");
-      return;
-    }
-
-    if (to < from) {
-      error_reply(416, "Requested Range Not Satisfiable", "You requested a backward range.");
-      return;
-    }
-    reply.start = from;
-    reply.file_length = to - from + 1;
-
-    startCommonHeader(206, "Partial Content", reply.file_length);
-    reply.header.fd.printf("Content-Range: bytes %llu-%llu/%llu\r\n", llu(from), llu(to), llu(filestat.st_size));
-
-    debug("sending %llu-%llu/%llu\n", llu(from), llu(to), llu(filestat.st_size));
-  } else {
-    /* no range stuff */
-    reply.file_length = filestat.st_size;
-    startCommonHeader(200, "OK", reply.file_length);
+  ByteRange actual = rq.range.canonical(filestat.st_size);
+  if (!actual.begin.given) {
+    err(-1, "internal error - from/to mismatch");
   }
+
+  if (actual.begin >= filestat.st_size) {
+    error_reply(416, "Requested Range Not Satisfiable", "You requested a range outside of the file.");
+    return;
+  }
+
+  if (actual.end < actual.begin) {
+    error_reply(416, "Requested Range Not Satisfiable", "You requested a backward range.");
+    return;
+  }
+  reply.start = actual.begin;
+  reply.file_length = actual.end - actual.begin + 1;
+
+  startCommonHeader(206, "Partial Content", reply.file_length);
+  reply.header.fd.printf("Content-Range: bytes %llu-%llu/%llu\r\n", llu(actual.begin), llu(actual.end), llu(filestat.st_size));
+
+  debug("sending %llu-%llu/%llu\n", llu(actual.begin), llu(actual.end), llu(filestat.st_size));
+
+  startCommonHeader(200, "OK", reply.file_length);
+
   reply.header.fd.printf("Content-Type: %s\r\n", mimetype);
   reply.header.fd.printf("Last-Modified: %s\r\n", lastmod);
   endHeader();
@@ -1297,11 +1200,11 @@ void Connection::process_request() {
   } else
 #endif
   /* fail if: (auth_enabled) AND (client supplied invalid credentials) */
-  if (!service.auth(authorization)) {
+  if (!service.auth(rq.authorization)) {
     error_reply(401, "Unauthorized", "Access denied due to invalid credentials.");
-  } else if (method == GET) {
+  } else if (rq.method == Request::GET) {
     process_get();
-  } else if (method == HEAD) {
+  } else if (rq.method == Request::HEAD) {
     reply.header_only = true; //setting early so that process can skip steps such as just sizing a response rather than generating it.
     process_get();
   } else {
@@ -1315,7 +1218,7 @@ void Connection::process_request() {
 void Connection::poll_recv_request() {
   // char buf[1 << 15]; //32k is excessive, refuse any request that is longer than a header+maximum filename + any options allowed with a '?' for processing a file (of which the only ones of interest are directory listing options).
   assert(state == RECV_REQUEST);
-  ssize_t recvd = recv(socket, received.begin(), sizeof(theRequest) - received.length, MSG_DONTWAIT); //MSG_DONTWAIT in case we are wrong about there being at least one byte of data present when a connection is accepted.
+  ssize_t recvd = recv(socket, rq.received.begin(), sizeof(rq.theRequest) - rq.received.length, MSG_DONTWAIT); //MSG_DONTWAIT in case we are wrong about there being at least one byte of data present when a connection is accepted.
   debug("poll_recv_request(%d) got %d bytes\n", int(socket), int(recvd));
   if (recvd == -1) {
     if (errno == EAGAIN) {
@@ -1323,7 +1226,7 @@ void Connection::poll_recv_request() {
       return;
     }
     debug("recv(%d) error: %s\n", int(socket), strerror(errno));
-    keepalive.dieNow = true;
+    rq.keepalive.dieNow = true;
     state = DONE;
     return;
   }
@@ -1333,11 +1236,16 @@ void Connection::poll_recv_request() {
   service.fyi.total_in += recvd;
   last_active = service.now;
 
-  *received.begin() = 0; //make the buff into a null terminated string.
+  *rq.received.begin() = 0; //make the buff into a null terminated string.
   //restart parse with each chunk until we parse a complete chunk. Seems wasteful but since it is rare that we don't get the whole request header in the first block we are going to keep the code simple.
-  StringView chopper(theRequest, received.start); //perhaps -1?
+  StringView chopper(rq.theRequest, rq.received.start); //perhaps -1?
 
-  bool readyToRoll = parse_request(chopper);
+  bool readyToRoll = rq.parse(chopper);
+  /* cmdline flag can be used to deny keep-alive */
+  if (!service.want_keepalive) {
+    rq.keepalive.dieNow = true; //override parse.
+  }
+
 
   if (!readyToRoll) {
     //todo: distinguish between not all here yet and too corrupt to process.
@@ -1378,7 +1286,7 @@ void Connection::poll_send_header() {
     if (sent == -1) {
       debug("send(%d) error: %s\n", int(socket), strerror(errno));
     }
-    keepalive.dieNow = true;
+    rq.keepalive.dieNow = true;
     state = DONE;
     return;
   }
@@ -1500,7 +1408,7 @@ void Connection::poll_send_reply() {
     } else if (sent == 0) {
       debug("send(%d) closure\n", int(socket));
     }
-    keepalive.dieNow = true;
+    rq.keepalive.dieNow = true;
     state = DONE;
     return;
   }
@@ -1646,7 +1554,7 @@ void Server::httpd_poll() {
     /* Handling SEND_REPLY could have set the state to done. */
     if (conn->state == Connection::DONE) {
       /* clean out finished connection */
-      if (conn->keepalive.dieNow) {
+      if (conn->rq.keepalive.dieNow) {
         //todo: return to pool rather than immediately discarding
         connections.remove(conn);
         conn->recycle();
@@ -1732,57 +1640,6 @@ void Server::Daemon::finish() {
 }
 #endif
 
-const char *Server::DropPrivilege::typeName() {
-  return asGgroup ? "gid" : "uid";
-}
-
-bool Server::DropPrivilege::validate() {
-  if (asGgroup) {
-    group *g = getgrnam(byName);
-    if (!g) {
-      g = getgrgid(atoi(byName));
-    }
-    if (g) {
-      byNumber = g->gr_gid;
-      return true;
-    }
-  } else {
-    passwd *p = getpwnam(byName);
-    if (!p) {
-      p = getpwuid(atoi(byName));
-    }
-    if (p) {
-      byNumber = p->pw_uid;
-      return true;
-    }
-  }
-  err(-1, "no such %s: `%s'", typeName(), byName);
-  return false;
-}
-
-bool Server::DropPrivilege::operator()() {
-  validate();
-  int setit = -1; //init to 'failed'
-
-  if (asGgroup) {
-    gid_t list[1] = {byNumber};
-    if (setgroups(1, list) == -1) { //todo: this seems aggressive/intrusive, I'd rather have the gid drop fail if the user is not already in that supposedly limited group.
-      err(1, "setgroups([%u])", byNumber);
-      return false;
-    }
-    setit = setgid(byNumber);
-  } else {
-    setit = setuid(byNumber);
-  }
-  if (setit == -1) {
-    err(1, "set%s(%u)", asGgroup ? "gid" : "uid", byNumber);
-    return false;
-  }
-
-  printf("set %s to %u\n", asGgroup ? "gid" : "uid", byNumber);
-  return true;
-}
-
 void Server::change_root() {
 #ifdef HAVE_NON_ROOT_CHROOT
   /* We run this even as root, which should never be a bad thing. */
@@ -1812,13 +1669,12 @@ void Server::stop_running(int sig unused) {
   }
 }
 
-void Server::ReallyDarkLogger::put(Connection::HttpMethods method) {
-
+void Server::ReallyDarkLogger::put(Connection::Request::HttpMethods method) {
   switch (method) {
-    case Connection::GET:
+    case Connection::Request::GET:
       DarkLogger::put("GET");
       break;
-    case Connection::HEAD:
+    case Connection::Request::HEAD:
       DarkLogger::put("HEAD");
       break;
     default:
@@ -1991,7 +1847,7 @@ bool Server::Authorizer::operator()(StringView user_input) {
   user_input.trimLeading(" \t");
   auto shouldBeBasic = user_input.cutToken(' ', false);
   if (shouldBeBasic != "Basic") {
-    warn("Auth technique not supported: %s", shouldBeBasic.begin());//auth will fail to client, this message is to sysadmin.
+    warn("Auth technique not supported: %s", shouldBeBasic.begin()); //auth will fail to client, this message is to sysadmin.
   }
   StringView scanner(key);
   Base64Getter base64(user_input);

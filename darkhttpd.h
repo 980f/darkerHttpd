@@ -32,17 +32,14 @@
 
 #pragma once
 
-#ifdef __linux
-#ifndef _GNU_SOURCE // suppress warning, not sure who already set this.
-#define _GNU_SOURCE /* for strsignal() and vasprintf() */
-#endif
-#endif
-
 #include "byterange.h"
 #include "darklogger.h"
 #include "stringview.h"
 #include "checkFormatArgs.h"
 #include "fd.h"
+#include "mimer.h"
+#include "now.h"
+
 
 #include <vector>
 #include <cstring>
@@ -50,11 +47,11 @@
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <dropprivilege.h>
 #include <unistd.h>
 #include <forward_list>
 
 #include <locale>
-#include <now.h>
 
 #include <netinet/in.h>
 #include <sys/stat.h>
@@ -88,39 +85,55 @@ namespace DarkHttpd {
     Now last_active = 0;
 
     enum {
+      BORN=0, /* constructed, not fully initialized */
       RECV_REQUEST, /* receiving request */
       SEND_HEADER, /* sending generated header */
       SEND_REPLY, /* sending reply */
       DONE /* connection closed, need to remove from queue */
-    } state = DONE; // DONE makes it harmless so it gets garbage-collected if it should, for some reason, fail to be correctly filled out.
-
-    struct Lifetime {
-      bool dieNow = true;
-      unsigned requested = 0;
-      unsigned max=0;
-    } keepalive;
+    } state = BORN; // DONE makes it harmless so it gets garbage-collected if it should, for some reason, fail to be correctly filled out.
 
 
-    //the following should be a runtime or at least compile time option. This code doesn't support put or post so it does not receive arbitrarily large requests.
-    static constexpr size_t RequestSizeLimit = 1500; //vastly more than is needed for most GET'ing, this would only be small for a PUT and we will stream around the buffer by parsing as the content arrives and recognizing the PUT and the header boundary soon enough to do that.
-    char theRequest[RequestSizeLimit+1/*for null terminator */];
-    StringView received{nullptr, 0, 0}; //bytes in.
+    struct Request {
+      //the following should be a runtime or at least compile time option. This code doesn't support put or post so it does not receive arbitrarily large requests.
+      static constexpr size_t RequestSizeLimit = 1500; //vastly more than is needed for most GET'ing, this would only be small for a PUT and we will stream around the buffer by parsing as the content arrives and recognizing the PUT and the header boundary soon enough to do that.
+      char theRequest[RequestSizeLimit + 1/*for null terminator */];
+      StringView received{nullptr, 0, 0}; //bytes in.
 
-    /* request fields */
-    enum HttpMethods {
-      NotMine = 0, GET, HEAD,
-      // POST,PUT  //expose these only as we add code to support them.
-    } method;
+      /* request fields */
+      enum HttpMethods {
+        NotMine = 0, GET, HEAD,
+        // POST,PUT  //expose these only as we add code to support them.
+      } method;
 
-    StringView hostname; //this was missing in original server, that failed to do hostname checking that is nominally required by RFC7230
-    StringView url;
-    char *urlParams; //pointer to url text that followed a '?', 980f is considering using those in directory listings to support formatting options and the use a shell to ls for the listing.
-    StringView referer;
-    StringView user_agent;
-    StringView authorization;
-    bool is_https_redirect; //This just indicates protocol that the client says that they sent out, in case intervening layers strip that info. Its only use should be on outgoing redirection requests. Should be named 'redirect_is_https'
-    Now if_mod_since;
-    ByteRange range;
+      StringView hostname; //this was missing in original server, that failed to do hostname checking that is nominally required by RFC7230
+      StringView url;
+      char *urlParams; //pointer to url text that followed a '?', 980f is considering using those in directory listings to support formatting options and the use a shell to ls for the listing.
+      StringView referer;
+      StringView user_agent;
+      StringView authorization;
+      bool is_https_redirect; //This just indicates protocol that the client says that they sent out, in case intervening layers strip that info. Its only use should be on outgoing redirection requests. Should be named 'redirect_is_https'
+      Now if_mod_since;
+      ByteRange range;
+
+      struct Lifetime {
+        bool dieNow = true;
+        unsigned requested = 0;
+        unsigned max = 0;
+        bool timeToDie(time_t beenAlive );
+
+        unsigned &cli_timeout;
+
+        Lifetime(unsigned &cli_Timeout) : cli_timeout{cli_Timeout} {}
+      } keepalive;
+
+      void clear();
+
+      Request(unsigned  &cli_timeout);
+
+      bool parse(StringView scanner);
+      /* call recv on the socket */
+      ssize_t receive(int socket);
+    } rq;
 
     struct Replier {
       int http_code = 0;
@@ -131,14 +144,7 @@ namespace DarkHttpd {
         bool dont_free = false;
         size_t sent = 0;
 
-        void recycle(bool andForget) {
-          dont_free = false;
-          sent = 0;
-          if (andForget) { //suspicious fragment in the original, abandoned an open file descriptor, potentially leaking it.
-            fd.forget(); // but it might be still open ?!
-          }
-          fd.close();
-        }
+        void recycle(bool andForget);
 
         void clear() {
           if (!dont_free) {
@@ -188,7 +194,7 @@ namespace DarkHttpd {
 
     void catContentLength(off_t off);
 
-    void startCommonHeader(int errcode, const char *errtext, off_t contentLenght);
+    void startCommonHeader(int errcode, const char *errtext, off_t contentLength);
 
     void catAuth();
 
@@ -208,8 +214,6 @@ namespace DarkHttpd {
 
     void redirect_https();
 
-    bool parse_request(StringView scanner);
-
     void process_get();
 
     void process_request();
@@ -224,7 +228,7 @@ namespace DarkHttpd {
   }; //end of connection child class
 
   class Server {
-    friend Connection;//division of source into Server and Connection was done just to make more clear what is shared/configuration and what is per-request.
+    friend Connection; //division of source into Server and Connection was done just to make more clear what is shared/configuration and what is per-request.
     /** until we use the full signal set ability to pass our object we only allow one DarkHttpd per process.*/
     static Server *forSignals; //epoll will let us eliminate this, it adds a user pointer to the notification structure.
     static void stop_running(int sig);
@@ -235,12 +239,12 @@ namespace DarkHttpd {
     /* Defaults can be overridden on the command-line */
     const char *bindaddr = nullptr; //only assigned from cmdline
     uint16_t bindport; /* or 80 if running as root */
-    int max_connections = -1; /* kern.ipc.somaxconn */
-    bool want_daemon = false;
 
-    struct ReallyDarkLogger : DarkLogger {
-      void put(Connection::HttpMethods method);
-    } log;
+#if DarklySupportDaemon
+    bool want_daemon = false;
+#endif
+
+    int max_connections = -1; /* kern.ipc.somaxconn */
 
     /* If a connection is idle for timeout_secs or more, it gets closed and
          * removed from the connlist.
@@ -248,19 +252,13 @@ namespace DarkHttpd {
     unsigned timeout_secs = 30;
     bool want_keepalive = true;
 
-    struct Mimer {
-      const char *default_type = nullptr;
-      /** file of mime mappings gets read into here.*/
-      StringView fileContent=nullptr;
-      /** file to load mime types map from */
-      char *fileName=nullptr;
+    /** add pretty printer for local types. */
+    struct ReallyDarkLogger : DarkLogger {
+      void put(Connection::Request::HttpMethods method);
+    } log;
 
-      void start();
-      const char *operator()(const char *url);
-      void finish();
 
-      bool generate;//cli request to set given file to the internal set.
-    } contentType;
+    Mimer contentType;
 
     //todo: load only from file, not commandline. Might even drop feature.
     std::vector<const char *> custom_hdrs; //parse_commandline concatenation of argv's with formatting. Should just record their indexes and generate on sending rather than cacheing here.
@@ -269,38 +267,12 @@ namespace DarkHttpd {
 #endif
 
     bool want_server_id = true;
-    StringView wwwroot=nullptr; /* a path name */ //argv[1]  and even if we demonize it is still present
+    StringView wwwroot = nullptr; /* a path name */ //argv[1]  and even if we demonize it is still present
 
     bool want_chroot = false;
 
     const char *index_name = "index.html";
     bool no_listing = false;
-
-    struct DropPrivilege {
-      bool asGgroup;
-      char *byName = nullptr;
-      unsigned byNumber;
-
-      bool operator !() const {
-        return byName != nullptr;
-      }
-
-      operator unsigned() const {
-        return byNumber;
-      }
-
-      const char *typeName();
-
-      bool validate();
-
-      void operator=(char *arg) {
-        byName = arg;
-        //maybe: validate()
-        byNumber = atoi(arg); //unchecked conversion
-      }
-
-      bool operator()();
-    };
 
     DropPrivilege drop_uid{false};
     DropPrivilege drop_gid{true};
@@ -429,7 +401,7 @@ namespace DarkHttpd {
 
   protected:
     struct Authorizer {
-      StringView key=nullptr; //instead of expanding this we decode the incoming string.
+      StringView key = nullptr; //instead of expanding this we decode the incoming string.
       bool operator()(StringView authorization);
 
       operator bool() const {

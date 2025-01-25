@@ -7,14 +7,16 @@
   <body>
     <h2> Small webserver</h2>
     HTTP is a user of TCP so an existing library for that just needs an extension to its client.<br>
-    The request is typically 500 bytes and the max needed for any application can be decided by the application, the client can reject requests larger than that.<br>
+    <br>
+    The request is typically 500 bytes and the max needed for any application can be decided by the application, the client can reject requests larger than that. The typical MTU of 1500 seems like a moderate choice, smaller for a microcontroller which isn't serving much of anything other than its own status and can reject most browser shenanigans.<br>
+    <br>
     The first level of parsing is lines terminated by crlf with an empty line being "end of request". That can be followed by streaming data whose length is in one of the header lines.<br>
     <br>
     <ul>
-      <li>The first line starts with the method' '={GET,HEAD,POST,PUT, and some more exotic ones rarely used}</li>
-      <li> Next is the url terminatedby a space, internal spaces are encoded %20.</li>
+      <li>The first line starts with the method' '={<code>GET</code>,<code>HEAD</code>,<code>POST</code>,<code>PUT</code>, and some more exotic ones rarely used}</li>
+      <li> Next is the url terminated by a space, internal spaces are encoded %20.</li>
       <li> The url might be split by a '?' with the text after it application specific parameters while that before it is the name of a resource. The application gets to decide whether parameters are relevant or can be ignored or are a cause for rejecting the request.</li>
-      <li> Next is the protocol, "HTTP1.1" terminated by crlf.</li>
+      <li> Next is the protocol, "<code>HTTP1.1</code>" terminated by crlf.</li>
       <li> To guard against shenanigans when the url is a file name its dots and double dots and weird series of slashes should be normalized before being passed to the filesystem as an actual filename. This server will use CWD as the root for all resources, a url starting with slash is mapped to a file in the CWD.</li>
       <li> Headerlines follow where each begins with a text ending in ": ", a colon and a space. That is the header name and is followed by an arbitrary string ending with CRLF.</li>
       <li> Only those headers which are relevant need to be retained by the parsing of the request. Unfortunately many interesting header names are not valid program tokens so some nontrivial translation from the actual text to a reference to a value is needed. Header values should all be parsed before any are acted upon.</li>
@@ -24,48 +26,54 @@
     <table style="width: 100%" border="1">
       <tbody>
         <tr>
-          <td> "Referer" </td>
+          <td><code>Referer</code></td>
           <td><br>
           </td>
           <td>for detecting a redirect, why one should care is beyond me.</td>
         </tr>
         <tr>
-          <td>"User-Agent"</td>
+          <td><code>User-Agent</code></td>
           <td><br>
           </td>
           <td>for dealing with known bugs of the client</td>
         </tr>
         <tr>
-          <td> "Authorization" </td>
-          <td><br>
+          <td><code>Authorization</code></td>
+          <td><code>Basic </code><em>base64(user:password)</em><br>
           </td>
           <td>very simple access control, this is base64 decoded and compared to a locally managed password.</td>
         </tr>
         <tr>
-          <td> "If-Modified-Since" </td>
-          <td><br>
+          <td> <code>If-Modified-Since</code></td>
+          <td><em>date as a string, <br>
+              3 known formats</em><br>
           </td>
           <td>this is a check on the thing being requested, reporting when the client last sampled it. Don't send the data again if it has not changed.</td>
         </tr>
         <tr>
-          <td> "Host" </td>
-          <td><br>
+          <td><code>Host</code></td>
+          <td><em>domain</em>[<code>:</code><em>port</em>]<br>
           </td>
           <td>this is the prefix of the url that is often stripped out by the service that decided to route the http request to the server.</td>
         </tr>
         <tr>
-          <td> "X-Forwarded-Proto" </td>
-          <td>http or https</td>
+          <td><code>X-Forwarded-Proto</code></td>
+          <td><code>http</code> | <code>https</code></td>
           <td>used to help build a redirect response</td>
         </tr>
         <tr>
-          <td> "Connection" </td>
-          <td> "close" "keep-alive" </td>
+          <td><code>Connection</code></td>
+          <td><code>close</code> | <code>keep-alive</code></td>
           <td>notifies that another request might be coming soon and that the present connection should be allowed to hang around, or whether this is the end of a session and the server can close the connection once its response has shipped out.</td>
         </tr>
         <tr>
-          <td> "Range" </td>
-          <td>bytes [begin]-[end]</td>
+          <td><code>Keep-alive</code></td>
+          <td><code>timeout=</code><em>seconds</em><code>,max=</code><em>seconds</em></td>
+          <td>parameters for when <code>Connection</code> header is <code>keep-alive</code> </td>
+        </tr>
+        <tr>
+          <td><code>Range</code></td>
+          <td><code>bytes </code>[<em>begin</em>]<code>-</code>[<em>end</em>]</td>
           <td>Either but not both of the begin and end values may be omitted with obvious functionality.<br>
           </td>
         </tr>
@@ -88,23 +96,25 @@
     redirections are called for if the url was non-canonical, but they are not necessary, so we will leave that out at first, we are building a data source, not a routing resource. Abstract data concepts can be managed at OS level by using file links.<br>
     <br>
     <h3>Data events:</h3>
-    if receiving data then append to local request buffer and try-parse it. If we have a full header then initiate action upon it. Else we can choose to reparse the whole thing when more arises or carefully track the last byte that we successfully parsed. Keeping the whole content around allows parsing to proceed by recording start of content and writing a null over the separator char, converting the multiline text into multiple C-strings, no dynamic memory allocation required.<br>
-    if available to write then send more of which ever file is presently being sent, header or content. <br>
-    if nothing remains to be sent then response is complete and another request can be honored or the connection closed, with that choice being indicated in the request.<br>
+    On receiving data then append to local request buffer and try-parse it. If we have a full header then initiate action upon it. Else we can choose to reparse the whole thing when more bytes arrive, or carefully track the last byte that we successfully parsed. Keeping the whole content around allows parsing to proceed by recording start of content and writing a null over the separator char, converting the multiline text into multiple C-strings, no dynamic memory allocation required.<br>
+    On available to write then send more of which ever file is presently being sent, header or content.&nbsp; If nothing remains to be sent then response is complete and another request can be honored or the connection closed, with that choice being selected by the request.<br>
     <br>
     <h3>Response header:</h3>
     <ul>
-      <li>"HTTP/1.1 %d %s\r\n", reply.http_code, errtext); reply.header.fd.printf("Date: %s\r\n", service.now.image); </li>
-      <li>if (service.want_server_id) &nbsp;&nbsp;&nbsp; reply.header.fd.printf("Server: %s\r\n", pkgname);</li>
+      <li>"<code>HTTP/1.1 </code>%d %s\r\n", reply.http_code, errtext); //the pesky 3 decimal digit code, might as well leave ascii until the first digit is contemplated.</li>
+      <li>reply.header.fd.printf("<code>Date: </code>%s\r\n", service.now.image);//this application reflected the time at which the request was seen.</li>
+      <li>if (service.want_server_id)&nbsp; reply.header.fd.printf("<code>Server: </code>%s\r\n", pkgname); //arbitrary local name for the server actually providing the content, which has no fixed relationship to the domain name.</li>
       <li>"Accept-Ranges: bytes\r\n"); </li>
-      <li>if (conn_closed) {//told by request that we should close*/ reply.header.fd.printf("Connection: close\r\n");</li>
-      <li>else&nbsp; reply.header.fd.printf("Keep-Alive: timeout=%d\r\n", service.timeout_secs);</li>
-      <li>if have content length: "Content-Length: %llu\r\n", llu(off)); </li>
+      <li>if (conn_closed) {//told by request that we should close*/ reply.header.fd.printf("<code>Connection: close</code>\r\n");<br>
+        else&nbsp; reply.header.fd.printf("<code>Keep-Alive: timeout=</code>%d\r\n", service.timeout_secs);//&lt;&lt;from faulty code, there are two fields to reflect from </li>
+      <li>if have content length: "<code>Content-Length: </code>%llu\r\n", llu(off)); </li>
       <li>catFixed("Content-Type: %s\r\n",mimetype);</li>
-      <li> if (service.auth) "WWW-Authenticate: Basic realm=\"User Visible Realm\"\r\n");</li>
+      <li> if (service.auth) "<code>WWW-Authenticate:</code> <code>Basic</code> <code>realm=</code>\"User Visible Realm\"\r\n");&nbsp; //User Visible Realm is actually arbitrary text. Presumably a web client presents this when asking for login info.</li>
       <li>&nbsp;end with another crlf.</li>
     </ul>
+    Above is typical.<br>
     <br>
+    If sending bulk content rather than return a value as a cookie or a custom header that follows the response header and one really should make sure that the <code>Content-Length</code> you send is correct.<br>
     <br>
     <br>
   </body>

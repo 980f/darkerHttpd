@@ -38,6 +38,8 @@ struct ByteRange {
     end.clear();
   }
 
+  ByteRange canonical(__off_t st_Size);
+
   ByteRange() {
     clear();
   }

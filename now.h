@@ -45,7 +45,7 @@ public:
   }
 
   void refresh() {
-    raw = time(nullptr); //twofer: both are set to the same value
+    raw = time(nullptr);
     format();
   }
 
