@@ -52,6 +52,7 @@
 #include <forward_list>
 
 #include <locale>
+#include <logger.h>
 
 #include <netinet/in.h>
 #include <sys/stat.h>
@@ -130,7 +131,7 @@ namespace DarkHttpd {
 
       Request(unsigned  &cli_timeout);
 
-      bool parse(StringView scanner);
+      bool parse();
       /* call recv on the socket */
       ssize_t receive(int socket);
     } rq;
@@ -160,7 +161,7 @@ namespace DarkHttpd {
 
       off_t start = 0;
       off_t file_length = 0;
-      off_t total_sent = 0;
+      // off_t total_sent = 0;
 
       void clear();
 
@@ -171,6 +172,8 @@ namespace DarkHttpd {
 
     /* header + body = total, for logging */
   public:
+    void logOn(DarkLogger *log);
+
     Connection(Server &parent, int fd); //only called via new in socket acceptor code.
 
     /* forget the past request, and everything parsed from it or generated for it */
@@ -225,6 +228,8 @@ namespace DarkHttpd {
     void poll_send_reply();
 
     void generate_dir_listing(const char *path, const char *decoded_url);
+
+    void urlDoDirectory();
   }; //end of connection child class
 
   class Server {

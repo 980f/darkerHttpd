@@ -10,7 +10,6 @@
 #include <cstring>
 #include <cstdarg>
 #include <cstdio>
-// replaced err.h usage  with logging and throwing an exception.
 
 DarkException::DarkException(int returncode, const char *msgf, ...): returncode{returncode} {
   va_list args;
@@ -18,6 +17,7 @@ DarkException::DarkException(int returncode, const char *msgf, ...): returncode{
   fprintf(stderr,msgf, args);//todo:1 go through program logger instead of stderr
   va_end(args);
 }
+
 const char *DarkException::what() const noexcept  {
   return strerror(returncode);
 }
@@ -33,7 +33,6 @@ namespace DarkHttpd {
     fprintf(stderr, "err[%d]: %s", code, code > 0 ? strerror(code) : "is not an errno.");
     va_list va;
     va_start(va, format);
-
     vfprintf(stderr, format, va);
     va_end(va);
     throw DarkException(code);

@@ -31,6 +31,8 @@
 #include "addr6.h"
 #include "base64getter.h"
 #include <cheaptricks.h>
+#include <logger.h>
+
 #include "cliscanner.h"
 #include "directorylisting.h"
 #include "fd.h"
@@ -670,17 +672,17 @@ void Server::accept_connection() {
 }
 
 /* Add a connection's details to the logfile. */
-void Server::log_connection(const Connection *conn) {
-  if (log.file == nullptr) {
+void Connection::logOn(DarkLogger *log) {
+  if (!log ) {
     return;
   }
-  if (conn->reply.http_code == 0) {
+  if (reply.http_code == 0) {
     return; /* invalid - died in request */
   }
-  if (conn->rq.method == Connection::Request::NotMine) {
+  if (rq.method ==Request::NotMine) {
     return; /* invalid - didn't parse - maybe too long */
   }
-  log.tsv(get_address_text(&conn->client), now, conn->rq.method, conn->rq.url, conn->reply.http_code, conn->reply.total_sent, conn->rq.referer, conn->rq.user_agent);
+  log->tsv(service.get_address_text(&client), last_active, rq.method,rq.url,reply.http_code,reply.header.sent+reply.content.sent,rq.referer,rq.user_agent);
 }
 
 void Connection::Replier::Block::recycle(bool andForget) {
@@ -705,7 +707,6 @@ void Connection::Replier::clear() {
 
   start = 0;
   file_length = 0;
-  total_sent = 0;
 }
 
 Connection::Connection(Server &parent, int fd): socket(fd), service(parent), rq(service.timeout_secs), reply{} {
@@ -863,7 +864,7 @@ void Connection::startCommonHeader(int errcode, const char *errtext, off_t conte
 
 void Connection::catAuth() {
   if (service.auth) {
-    reply.header.fd.printf("WWW-Authenticate: Basic realm=\"simple file access\"\r\n");//todo:1 make realm text configurable, a cli in fact since the user might want it to reflect which wwwroot is in use.
+    reply.header.fd.printf("WWW-Authenticate: Basic realm=\"simple file access\"\r\n"); //todo:1 make realm text configurable, a cli in fact since the user might want it to reflect which wwwroot is in use.
   }
 }
 
@@ -975,7 +976,10 @@ void Connection::redirect_https() {
 /* Parse an HTTP request like "GET /urlGoes/here HTTP/1.1" to get the method (GET), the url (/), and those fields which are of interest to this application, ignoring any that are not.
  * todo: inject nulls so that more str functions can be used.
  */
-bool Connection::Request::parse(StringView scanner) {
+bool Connection::Request::parse() {
+  //restart parse with each chunk until we parse a complete chunk. Seems wasteful but since it is rare that we don't get the whole request header in the first block we are going to keep the code simple.
+  StringView scanner(theRequest, received.start); //perhaps -1?
+
   auto methodToken = scanner.cutToken(' ', false);
   if (!methodToken) {
     return false; //garble or too short to process
@@ -1101,16 +1105,7 @@ void Connection::process_get() {
     /* does it end in a slash? serve up url/index_name */
     strcat(target, service.index_name);
     if (!file_exists(target)) {
-      if (service.no_listing) {
-        /* Return 404 instead of 403 to make --no-listing
-         * indistinguishable from the directory not existing.
-         * i.e.: Don't leak information.
-         */
-        error_reply(404, "Not Found", "The URL you requested was not found.");
-        return;
-      }
-      generate_dir_listing(rq.url, rq.url); //todo: modify this to generate a content file, swapping out the file name and proceding in this module to get it sent.
-      return;
+      urlDoDirectory();
     }
     mimetype = service.contentType(service.index_name);
   } else {
@@ -1143,7 +1138,7 @@ void Connection::process_get() {
 
   /* make sure it's a regular file */
   if (S_ISDIR(filestat.st_mode)) {
-    redirect(nullptr, "/", rq.url); //todo:  probably should be same args as other redirect.
+    urlDoDirectory();
     return;
   } else if (!S_ISREG(filestat.st_mode)) {
     error_reply(403, "Forbidden", "Not a regular file.");
@@ -1237,10 +1232,8 @@ void Connection::poll_recv_request() {
   last_active = service.now;
 
   *rq.received.begin() = 0; //make the buff into a null terminated string.
-  //restart parse with each chunk until we parse a complete chunk. Seems wasteful but since it is rare that we don't get the whole request header in the first block we are going to keep the code simple.
-  StringView chopper(rq.theRequest, rq.received.start); //perhaps -1?
 
-  bool readyToRoll = rq.parse(chopper);
+  bool readyToRoll = rq.parse();
   /* cmdline flag can be used to deny keep-alive */
   if (!service.want_keepalive) {
     rq.keepalive.dieNow = true; //override parse.
@@ -1292,7 +1285,6 @@ void Connection::poll_send_header() {
   }
   assert(sent > 0);
   reply.header.sent += sent;
-  reply.total_sent += sent;
   service.fyi.total_out += sent;
 
   /* check if we're done sending header */
@@ -1343,7 +1335,7 @@ static ssize_t send_from_file(const int s, const int fd, off_t ofs, size_t size)
   if (size > 1 << 20) { //this is only 1 megabyte, with such a limit so much more of this code is pointless.
     size = 1 << 20;
   }
-  return sendfile(s, fd, &ofs, size);
+  return sendfile(s, fd, &ofs, size); //O_NONBLOCK needs to be set on opening the socket.
 #else
   /* Fake sendfile() with read(). */
 #ifndef min
@@ -1413,7 +1405,6 @@ void Connection::poll_send_reply() {
     return;
   }
   reply.content.sent += sent;
-  reply.total_sent += sent;
   service.fyi.total_out += sent;
 
   /* check if we're done sending */
@@ -1425,6 +1416,18 @@ void Connection::poll_send_reply() {
 void Connection::generate_dir_listing(const char *path, const char *decoded_url) {
   //preparing to have different listing generators, such as "system("ls") with '?'params fed to ls as its params.
   HtmlDirLister(*this)(path, decoded_url);
+}
+
+void Connection::urlDoDirectory() {
+  if (service.no_listing) {
+    /* Return 404 instead of 403 to make --no-listing
+     * indistinguishable from the directory not existing.
+     * i.e.: Don't leak information.
+     */
+    error_reply(404, "Not Found", "The URL you requested was not found.");
+  } else {
+    generate_dir_listing(rq.url, rq.url); //todo: modify this to generate a content file, swapping out the file name and proceding in this module to get it sent.
+  }
 }
 
 /* Main loop of the httpd - a select() and then delegation to accept
@@ -1470,6 +1473,8 @@ void Server::httpd_poll() {
       case Connection::SEND_REPLY:
         MAX_FD_SET(int(conn->socket), &send_set);
         bother_with_timeout = true;
+        break;
+      default:
         break;
     }
   }
@@ -1548,6 +1553,8 @@ void Server::httpd_poll() {
 
       case Connection::DONE:
         /* (handled later; ignore for now as it's a valid state) */
+        break;
+      default:
         break;
     }
 
@@ -1741,7 +1748,7 @@ bool Server::prepareToRun() {
       drop_uid();
     }
   } catch (...) {
-    err(1, "uid or gid params neither valid name nor valid id value");
+    err(1, "uid or gid params neither valid name nor valid id value or are an attempt to raise rather than drop priority");
     return false;
   }
 #if DarklySupportDaemon
@@ -1870,14 +1877,9 @@ bool Server::Authorizer::operator()(StringView user_input) {
 int Server::main(int argc, char **argv) {
   int exitcode = 0;
   try {
-    printf("%s, %s.\n", pkgname, copyright);
-    parse_commandline(argc, argv);
-    /* NB: parse_commandline() might override parts of the extension map by
-     * parsing a user-specified file. THat is why we use insert_or_add when parsing it into the map.
-     */
-    prepareToRun();
+    printf("%s, %s.\n", pkgname, copyright); //why is this not using the logging facility?
+    running = parse_commandline(argc, argv) && prepareToRun();
     /* main loop */
-    running = true;
     while (running) {
       httpd_poll();
     }
@@ -1889,7 +1891,7 @@ int Server::main(int argc, char **argv) {
     }
 #endif
   } catch (DarkException ex) {
-    printf("Exit %d attempted, ending polling loop in __FUNCTION__", ex.returncode);
+    printf("Exit due to %d, details sent to stderr" , ex.returncode); //original code didn't use __F..__ correctly.
     exitcode = ex.returncode;
   } catch (...) {
     printf("Unknown exception, probably from the std lib");

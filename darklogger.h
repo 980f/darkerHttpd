@@ -14,6 +14,10 @@ struct DarkLogger {
   char *file_name = nullptr; /* NULL = no logging */
   FILE *file = nullptr;
 
+  bool operator !()const {
+    return file==nullptr;
+  }
+
   /* open the file, perhaps emit a line to make it easy to find start and stop times */
   bool begin();
 
