@@ -31,10 +31,9 @@ public:
     return dest;
   }
 
-//  #this confuses compiler, too many candidates.
-   // operator time_t() const {
-   //   return raw;
-   // }
+   operator time_t() const {
+     return raw;
+   }
 
   operator bool() const {
     return raw != 0;

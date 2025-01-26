@@ -29,35 +29,20 @@ struct DarkLogger {
   /* close the file, perhaps with a sign-off message */
   void close();
 
-  /** each put method knows how to format its type to the output. */
-  // void put(char &&item) const;
-  //
-  // void put(char now) const;
-  //
-  // void put(const char *item) const;
-  //
-  // void put(time_t time) const;
-  //
-  // void put(StringView view) const;
-  //
-  // /* todo: this guy might be intercepting and truncating longer int types. But we already expect to choke on 2Gig+ files so fixing this is not urgent */
-  // void put(int number) const;
-  //
-  // void put(Now now) const;
-
+/** attempts to have out of line non template put members got tedious as the compiler tries way too hard to find variations to pick from and has no syntax for coercing priority. */
   template<typename Scalar> void put(Scalar item) {
-    if constexpr (std::same_as<time_t, Scalar>) {
+    if constexpr (std::is_convertible<Scalar,time_t>::value) {
 #define CLF_DATE_LEN 29 /* strlen("[10/Oct/2000:13:55:36 -0700]")+1 */
       char dest[CLF_DATE_LEN];
       tm tm;
-      localtime_r(&item, &tm);
+      localtime_r(reinterpret_cast<const time_t *>(&item), &tm);
       if (strftime(dest, CLF_DATE_LEN, "[%d/%b/%Y:%H:%M:%S %z]", &tm) == 0) {
         dest[0] = 0;
       }
       put(dest);
 #undef CLF_DATE_LEN
-    } else if constexpr (std::same_as<Now, Scalar>) {
-      put<time_t>(item);
+    // } else if constexpr (std::same_as<Now, Scalar>) {
+      // put<time_t>(item);
     } else if constexpr (std::same_as<StringView, Scalar>) {
       if (syslog_enabled) {
         syslog(LOG_INFO, "%*s", int(item.length), item.begin());
