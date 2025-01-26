@@ -52,4 +52,8 @@ struct ByteRange {
   ByteRange() {
     clear();
   }
+
+  off_t getLength() const {
+    return end-begin;//todo:00 off by one
+  }
 };

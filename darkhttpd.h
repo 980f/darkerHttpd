@@ -140,7 +140,7 @@ namespace DarkHttpd {
       struct Block {
         Fd fd;
         bool dont_free = false;
-        size_t sent = 0;
+        //altering range begin rather than having a separate variable which usually was added to it dynamically  size_t sent = 0;
         ByteRange range; //tracks sending.
         void recycle(bool andForget);
 
@@ -161,8 +161,6 @@ namespace DarkHttpd {
 
       Block header;
       Block content;
-      //which block is in progress, null while not sending anything.
-      Block *sending = nullptr;
 
       void clear();
     } reply;
@@ -219,6 +217,8 @@ namespace DarkHttpd {
     void process_request();
 
     void poll_recv_request();
+
+    int sendRange(Replier::Block &sending);
 
     void poll_send_header();
 

@@ -32,6 +32,7 @@
 #include "base64getter.h"
 #include <cheaptricks.h>
 #include <fcntl.h>
+#include <limits>
 #include <logger.h>
 
 #include "cliscanner.h"
@@ -52,7 +53,6 @@ static const char copyright[] = "copyright (c) 2003-2024 Emil Mikulic"
 // #include <sys/sendfile.h>
 // #endif
 
-static ssize_t send_from_file(int s, int fd, off_t ofs, size_t size);
 
 #include <arpa/inet.h>
 #include <cassert>
@@ -66,7 +66,6 @@ static ssize_t send_from_file(int s, int fd, off_t ofs, size_t size);
 #include <cstring>
 #include <ctime>
 #include <netinet/tcp.h>
-// #include <sys/param.h>
 #include <sys/resource.h>  //used by reportstats
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -74,7 +73,77 @@ static ssize_t send_from_file(int s, int fd, off_t ofs, size_t size);
 #include <sys/types.h>
 #include <unistd.h>
 #include <wait.h>  //used by one of the conditionally compiled blocks, do not remove. TODO: find which conditional flag isinvolved.
+
 using namespace DarkHttpd;
+/* Send chunk on socket <s> from FILE *fp, starting at <ofs> and of size
+ * <size>.  Use sendfile() if possible since it's zero-copy on some platforms.
+ * Returns the number of bytes sent, 0 on closure, -1 if send() failed, -2 if
+ * read error.
+ *
+ * TODO: send headers with sendfile(), this will result in fewer packets.
+ */
+static ssize_t send_from_file(const int s, const int fd, ByteRange &range) {
+  /* off_t of file_length can be wider than size_t, avoid overflow in send_len */
+
+  off_t send_len = std::min(range.getLength(), off_t(std::numeric_limits<size_t>::max()));
+
+  errno = 0;
+
+#ifdef __FreeBSD__
+  off_t sent;
+  int ret = sendfile(fd, s, ofs, send_len, NULL, &sent, 0);
+
+  /* It is possible for sendfile to send zero bytes due to a blocking
+   * condition.  Handle this correctly.
+   */
+  if (ret == -1) {
+    if (errno == EAGAIN) {
+      if (sent == 0) {
+        return -1;
+      } else {
+        return sent;
+      }
+    } else {
+      return -1;
+    }
+  } else {
+    return size;
+  }
+#else
+#if defined(__linux) || defined(__sun__)
+  /* Limit truly ridiculous (LARGEFILE) requests. */
+  // send_len=std::min(send_len, 1 << 20);// //this is only 1 megabyte, no good reason is given to apply this to sendfile.
+  //NB: range.being.number gets altered by this call, don't reproduce that ourselves!
+  return sendfile(s, fd, &range.begin.number, send_len); //O_NONBLOCK needs to be set on opening the socket.
+#else
+  /* Fake sendfile() with read(). */
+#ifndef min
+#define min(a, b) (((a) < (b)) ? (a) : (b))
+#endif
+  char buf[1 << 15];
+  size_t amount = min(sizeof(buf), size);
+  ssize_t numread;
+
+  if (lseek(fd, ofs, SEEK_SET) == -1) {
+    err(1, "fseek(%d)", (int) ofs);
+  }
+  numread = read(fd, buf, amount);
+  if (numread == 0) {
+    fprintf(stderr, "premature eof on fd %d\n", fd);
+    return -1;
+  } else if (numread == -1) {
+    fprintf(stderr, "error reading on fd %d: %s", fd, strerror(errno));
+    return -1;
+  } else if ((size_t) numread != amount) {
+    fprintf(stderr, "read %zd bytes, expecting %zu bytes on fd %d\n",
+      numread, amount, fd);
+    return -1;
+  } else {
+    return send(s, buf, amount, 0);
+  }
+#endif
+#endif
+}
 
 class DebugLog {
   bool spew = false;
@@ -674,21 +743,20 @@ void Server::accept_connection() {
 
 /* Add a connection's details to the logfile. */
 void Connection::logOn(DarkLogger *log) {
-  if (!log ) {
+  if (!log) {
     return;
   }
   if (reply.http_code == 0) {
     return; /* invalid - died in request */
   }
-  if (rq.method ==Request::NotMine) {
+  if (rq.method == Request::NotMine) {
     return; /* invalid - didn't parse - maybe too long */
   }
-  log->tsv(service.get_address_text(&client), last_active, rq.method,rq.url,reply.http_code,reply.header.sent+reply.content.sent,rq.referer,rq.user_agent);
+  log->tsv(service.get_address_text(&client), last_active, rq.method, rq.url, reply.http_code, rq.referer, rq.user_agent);
 }
 
 void Connection::Replier::Block::recycle(bool andForget) {
   dont_free = false;
-  sent = 0;
   if (andForget) { //suspicious fragment in the original, abandoned an open file descriptor, potentially leaking it.
     fd.forget(); // but it might be still open ?!
   }
@@ -700,7 +768,7 @@ FILE *Connection::Replier::Block::createTemp() {
 }
 
 off_t Connection::Replier::Block::getLength() {
-  if (range.begin.given&& range.end.given) {
+  if (range.begin.given && range.end.given) {
     return range.end.given - range.begin.given;
   } else {
     return -1;
@@ -917,7 +985,6 @@ void Connection::error_reply(const int errcode, const char *errname, const char 
   endHeader();
 
   reply.header_only = false;
-
 }
 
 void Connection::endReply() {
@@ -1142,7 +1209,7 @@ void Connection::process_get() {
     error_reply(500, "Internal Server Error", "fstat() failed: %s.", strerror(errno));
     return;
   }
-  reply.content.range.setForSize( filestat.st_size);//we'll apply request range to this momentarily
+  reply.content.range.setForSize(filestat.st_size); //we'll apply request range to this momentarily
 
   /* make sure it's a regular file */
   if (S_ISDIR(filestat.st_mode)) {
@@ -1178,7 +1245,7 @@ void Connection::process_get() {
     error_reply(416, "Requested Range Not Satisfiable", "You requested a backward range.");
     return;
   }
-  reply.content.range= actual;
+  reply.content.range = actual;
 
   startCommonHeader(206, "Partial Content", reply.content.getLength());
   reply.header.fd.printf("Content-Range: bytes %llu-%llu/%llu\r\n", llu(actual.begin), llu(actual.end), llu(filestat.st_size));
@@ -1266,160 +1333,67 @@ void Connection::poll_recv_request() {
   }
 }
 
-/* Sending header.  Assumes conn->header is not NULL. */
-void Connection::poll_send_header() {
-  ssize_t sent;
-
-  assert(state == SEND_HEADER);
-  // assert(header.length == strlen(header));
-  reply.sending=&reply.header;
-
-  sent = send_from_file(socket, reply.sending->fd, 0, reply.sending->getLength());
-  last_active = service.now;
-  debug("poll_send_header(%d) sent %d bytes\n", int(socket), (int) sent);
+int Connection::sendRange(Replier::Block &sending) {
+  auto sent = send_from_file(socket, sending.fd, sending.range);
+  last_active = service.now; //keeps alive while shuffling bytes to client.
+  debug("sendRange(%d) sent %d bytes\n", int(socket), (int) sent);
+  debug("socket(%d) sent %ld: [%llu-%llu] of %s\n", int(socket), sent, llu(sending.range.begin), llu(sending.range.end), "someday the filename will go here");
 
   /* handle any errors (-1) or closure (0) in send() */
   if (sent < 1) {
     if (sent == -1 && errno == EAGAIN) {
       debug("poll_send_header would have blocked\n");
-      return;
+      return 0; //submitted
     }
     if (sent == -1) {
       debug("send(%d) error: %s\n", int(socket), strerror(errno));
+      debug("send_from_file returned %lld (errno=%d %s)\n", llu(sent), errno, strerror(errno));
+      return errno;
     }
-    rq.keepalive.dieNow = true;
-    state = DONE;
-    return;
-  }
-  assert(sent > 0);
-  reply.sending->sent += sent;
-  service.fyi.total_out += sent;
-
-  /* check if we're done sending header */
-  if (reply.sending->sent+reply.sending->range.begin == reply.sending->range.end) {
-    if (reply.header_only) {
-      state = DONE;
-    } else {
-      state = SEND_REPLY;
-      /* go straight on to body, don't go through another iteration of
-       * the select() loop.
-       */
-      poll_send_reply();
-    }
-  }
-}
-
-/* Send chunk on socket <s> from FILE *fp, starting at <ofs> and of size
- * <size>.  Use sendfile() if possible since it's zero-copy on some platforms.
- * Returns the number of bytes sent, 0 on closure, -1 if send() failed, -2 if
- * read error.
- *
- * TODO: send headers with sendfile(), this will result in fewer packets.
- */
-static ssize_t send_from_file(const int s, const int fd, off_t ofs, size_t size) {
-#ifdef __FreeBSD__
-  off_t sent;
-  int ret = sendfile(fd, s, ofs, size, NULL, &sent, 0);
-
-  /* It is possible for sendfile to send zero bytes due to a blocking
-   * condition.  Handle this correctly.
-   */
-  if (ret == -1) {
-    if (errno == EAGAIN) {
-      if (sent == 0) {
-        return -1;
-      } else {
-        return sent;
-      }
-    } else {
-      return -1;
-    }
-  } else {
-    return size;
-  }
-#else
-#if defined(__linux) || defined(__sun__)
-  /* Limit truly ridiculous (LARGEFILE) requests. */
-  if (size > 1 << 20) { //this is only 1 megabyte, with such a limit so much more of this code is pointless.
-    size = 1 << 20;
-  }
-  return sendfile(s, fd, &ofs, size); //O_NONBLOCK needs to be set on opening the socket.
-#else
-  /* Fake sendfile() with read(). */
-#ifndef min
-#define min(a, b) (((a) < (b)) ? (a) : (b))
-#endif
-  char buf[1 << 15];
-  size_t amount = min(sizeof(buf), size);
-  ssize_t numread;
-
-  if (lseek(fd, ofs, SEEK_SET) == -1) {
-    err(1, "fseek(%d)", (int) ofs);
-  }
-  numread = read(fd, buf, amount);
-  if (numread == 0) {
-    fprintf(stderr, "premature eof on fd %d\n", fd);
+    //what does zero bytes mean?
+    //if header: rq.keepalive.dieNow = true;
     return -1;
-  } else if (numread == -1) {
-    fprintf(stderr, "error reading on fd %d: %s", fd, strerror(errno));
-    return -1;
-  } else if ((size_t) numread != amount) {
-    fprintf(stderr, "read %zd bytes, expecting %zu bytes on fd %d\n",
-      numread, amount, fd);
-    return -1;
-  } else {
-    return send(s, buf, amount, 0);
   }
-#endif
-#endif
-}
-
-/* Sending reply. */
-void Connection::poll_send_reply() {
-  ssize_t sent;
-
-  assert(state == SEND_REPLY);
-  assert(!reply.header_only);
-
-  reply.sending=&reply.header;
-
-  /* off_t of file_length can be wider than size_t, avoid overflow in send_len */
-  const size_t max_size_t = ~0;
-  off_t send_len = reply.sending->getLength() - reply.sending->sent;
-  if (send_len > max_size_t) {
-    send_len = max_size_t;
-  }
-  errno = 0;
-  // assert(reply.file_length >= reply.content.sent);
-  sent = send_from_file(socket, reply.sending->fd, reply.sending->range.begin + reply.content.sent, send_len);
-  if (sent < 1) {
-    debug("send_from_file returned %lld (errno=%d %s)\n", llu(sent), errno, strerror(errno));
-  }
-
-  last_active = service.now;
-  debug("poll_send_reply(%d) sent %ld: %llu+[%llu-%llu] of %llu\n", int(socket), sent, llu(reply.sending->range.begin), llu(reply.content.sent), llu(reply.content.sent + sent - 1), llu(reply.sending->getLength()));
-
-  /* handle any errors (-1) or closure (0) in send() */
-  if (sent < 1) {
-    if (sent == -1) {
-      if (errno == EAGAIN) {
-        debug("poll_send_reply would have blocked\n");
-        return;
-      }
-      debug("send(%d) error: %s\n", int(socket), strerror(errno));
-    } else if (sent == 0) {
-      debug("send(%d) closure\n", int(socket));
-    }
-    rq.keepalive.dieNow = true;
-    state = DONE;
-    return;
-  }
-  reply.sending->sent += sent;
   service.fyi.total_out += sent;
 
   /* check if we're done sending */
-  if (reply.sending->sent + reply.sending->range.begin == reply.sending->range.end) {
-    state = DONE;
+  return sending.range.begin >= sending.range.end ? -2 : 0; //>= instead of == while working on off by one issue.
+}
+
+/* Sending header.  Assumes conn->header is not NULL. */
+void Connection::poll_send_header() {
+  switch (sendRange(reply.header)) {
+    case -1: //abnormal  termination
+      rq.keepalive.dieNow = true;
+      state = DONE;
+      break;
+    case -2: //add data sent
+      if (reply.header_only) {
+        state = DONE;
+      } else {
+        state = SEND_REPLY;
+        poll_send_reply();
+      }
+      break;
+    default: //some sent ok, expect event on reply.fd
+      break;
+  }
+}
+
+
+/* Sending reply. */
+void Connection::poll_send_reply() {
+  switch (sendRange(reply.content)) {
+    case -1: //abnormal  termination
+      debug("send(%d) closure\n", int(socket));
+      rq.keepalive.dieNow = true;
+      state = DONE;
+      return;
+    case -2: //add data sent
+      state = DONE;
+      return;
+    default: //some sent ok, expect event on reply.fd
+      break;
   }
 }
 
@@ -1712,7 +1686,7 @@ void Server::reportStats() const {
   getrusage(RUSAGE_SELF, &r);
   printf("CPU time used: %u.%02u user, %u.%02u system\n",
     static_cast<unsigned int>(r.ru_utime.tv_sec),
-    static_cast<unsigned int>(r.ru_utime.tv_usec),  //todo: why is this not also divided by 10k like the one below?
+    static_cast<unsigned int>(r.ru_utime.tv_usec), //todo: why is this not also divided by 10k like the one below?
     static_cast<unsigned int>(r.ru_stime.tv_sec),
     static_cast<unsigned int>(r.ru_stime.tv_usec / 10000));
   printf("Requests: %llu\n", llu(fyi.num_requests));
@@ -1901,7 +1875,7 @@ int Server::main(int argc, char **argv) {
     }
 #endif
   } catch (DarkException ex) {
-    printf("Exit due to %d, details sent to stderr" , ex.returncode); //original code didn't use __F..__ correctly.
+    printf("Exit due to %d, details sent to stderr", ex.returncode); //original code didn't use __F..__ correctly.
     exitcode = ex.returncode;
   } catch (...) {
     printf("Unknown exception, probably from the std lib");
