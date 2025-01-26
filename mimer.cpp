@@ -7,6 +7,8 @@
 #include "mimer.h"
 
 #include <cstring>
+#include <darkerror.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <fd.h>
 #include <sys/mman.h>
@@ -61,6 +63,10 @@ void Mimer::start() {
     struct stat filestat;
     if (fstat(fd, &filestat) == 0) {
       fileContent = StringView(static_cast<char *>(mmap(nullptr, filestat.st_size,PROT_READ,MAP_PRIVATE, fd, 0)), filestat.st_size);
+      if (fileContent == MAP_FAILED) {
+        fileContent = nullptr;
+        DarkHttpd::err(errno,"memory mapping mimetype files %s",fileName);
+      }
     }
   } else {
     if (generate) {

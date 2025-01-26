@@ -1702,7 +1702,7 @@ void Server::reportStats() const {
   getrusage(RUSAGE_SELF, &r);
   printf("CPU time used: %u.%02u user, %u.%02u system\n",
     static_cast<unsigned int>(r.ru_utime.tv_sec),
-    static_cast<unsigned int>(r.ru_utime.tv_usec),
+    static_cast<unsigned int>(r.ru_utime.tv_usec),  //todo: why is this not also divided by 10k like the one below?
     static_cast<unsigned int>(r.ru_stime.tv_sec),
     static_cast<unsigned int>(r.ru_stime.tv_usec / 10000));
   printf("Requests: %llu\n", llu(fyi.num_requests));

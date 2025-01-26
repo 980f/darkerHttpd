@@ -15,11 +15,16 @@ struct Mimer {
   /** file to load mime types map from */
   char *fileName = nullptr;
 
+  //access the file
   void start();
 
   const char *operator()(const char *url);
 
+  //release OS resources
   void finish();
 
-  bool generate; //cli request to set given file to the internal set.
+  /** cli request to set given file to the internal set.
+   * Presently it is acted upon by start().
+   */
+  bool generate;
 };
