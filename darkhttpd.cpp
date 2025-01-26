@@ -756,11 +756,10 @@ void Connection::logOn(DarkLogger *log) {
 }
 
 void Connection::Replier::Block::recycle(bool andForget) {
-  dont_free = false;
+  fd.close();
   if (andForget) { //suspicious fragment in the original, abandoned an open file descriptor, potentially leaking it.
     fd.forget(); // but it might be still open ?!
   }
-  fd.close();
 }
 
 FILE *Connection::Replier::Block::createTemp() {
@@ -779,11 +778,8 @@ void Connection::Replier::clear() {
   header_only = false;
   http_code = 0;
 
-  header.recycle(false);
-  content.recycle(true);
-
-  // start = 0;
-  // file_length = 0;
+  header.recycle(true);
+  content.recycle(true);//todo:1 might be conditional on actual file vs generated content.
 }
 
 Connection::Connection(Server &parent, int fd): socket(fd), service(parent), rq(service.timeout_secs), reply{} {
@@ -1193,7 +1189,7 @@ void Connection::process_get() {
   /* open file */
   reply.content.fd = open(target, O_RDONLY | O_NONBLOCK);
 
-  if (!reply.content.fd) { /* open() failed */
+  if (!reply.content.fd.seemsOk()) { /* open() failed */
     if (errno == EACCES) {
       error_reply(403, "Forbidden", "You don't have permission to access this URL.");
     } else if (errno == ENOENT) {
@@ -1204,23 +1200,23 @@ void Connection::process_get() {
     return;
   }
 
-  struct stat filestat;
-  if (fstat(reply.content.fd, &filestat) == -1) {
+  reply.content.statSize();//start with full possible size, reduce to requested range later.
+
+  if (!reply.content) {
     error_reply(500, "Internal Server Error", "fstat() failed: %s.", strerror(errno));
     return;
   }
-  reply.content.range.setForSize(filestat.st_size); //we'll apply request range to this momentarily
 
   /* make sure it's a regular file */
-  if (S_ISDIR(filestat.st_mode)) {
+  if (reply.content.fd.isDir()) {
     urlDoDirectory();
     return;
-  } else if (!S_ISREG(filestat.st_mode)) {
+  } else if (!reply.content.fd.isRegularFile()) {
     error_reply(403, "Forbidden", "Not a regular file.");
     return;
   }
 
-  Now lastmod(filestat.st_mtime, true); //convert file modification time into rfc1123 standard, rather than convert if_mod_since into time_t
+  Now lastmod(reply.content.fd.getModificationTimestamp(), true); //convert file modification time into rfc1123 standard, rather than convert if_mod_since into time_t
 
   /* check for If-Modified-Since, may not have to send */
   if (rq.if_mod_since && lastmod <= rq.if_mod_since) { //original code compared for equal, making this useless. We want file mod time any time after the given
@@ -1231,29 +1227,18 @@ void Connection::process_get() {
     return;
   }
 
-  ByteRange actual = rq.range.canonical(filestat.st_size);
-  if (!actual.begin.given) {
-    err(-1, "internal error - from/to mismatch");
+  if (!!rq.range) {
+    //now is the time to shrink the content range to that requested.
+    if (!reply.content.range.restrictTo(rq.range)) {
+      error_reply(416, "Requested Range Not Satisfiable", "You requested an invalid range or a range outside of the file or the file is not normal.");
+    }
+    startCommonHeader(206, "Partial Content", reply.content.getLength());
+  } else {
+    startCommonHeader(200, "OK", reply.content.getLength());
   }
+  debug("sending %llu-%llu/%llu\n", llu(reply.content.range.begin), llu(reply.content.range.end), llu(reply.content.fd.getLength()));
 
-  if (actual.begin >= filestat.st_size) {
-    error_reply(416, "Requested Range Not Satisfiable", "You requested a range outside of the file.");
-    return;
-  }
-
-  if (actual.end < actual.begin) {
-    error_reply(416, "Requested Range Not Satisfiable", "You requested a backward range.");
-    return;
-  }
-  reply.content.range = actual;
-
-  startCommonHeader(206, "Partial Content", reply.content.getLength());
-  reply.header.fd.printf("Content-Range: bytes %llu-%llu/%llu\r\n", llu(actual.begin), llu(actual.end), llu(filestat.st_size));
-
-  debug("sending %llu-%llu/%llu\n", llu(actual.begin), llu(actual.end), llu(filestat.st_size));
-
-  // startCommonHeader(200, "OK", reply.file_length);
-
+  reply.header.fd.printf("Content-Range: bytes %llu-%llu/%llu\r\n", llu(reply.content.range.begin), llu(reply.content.range.end), llu(reply.content.fd.getLength()));//may make this conditional on a partial range.if so just move it into the above 'if'
   reply.header.fd.printf("Content-Type: %s\r\n", mimetype);
   reply.header.fd.printf("Last-Modified: %s\r\n", lastmod);
   endHeader();

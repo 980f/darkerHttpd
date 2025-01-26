@@ -15,6 +15,7 @@ int Fd::operator=(int newfd) { // NOLINT(*-unconventional-assign-operator)
     fd = newfd;
     //consider caching stream here, if fd is open.
     stream = nullptr;
+    statted = false;
   }
 
   return newfd;
@@ -24,6 +25,7 @@ int Fd::operator=(FILE *fopened) {
   if (fopened) {
     stream = fopened;
     fd = fileno(stream);
+    statted = false;
   }
   return fd;
 }
@@ -60,16 +62,26 @@ size_t Fd::putln(const char *content) {
 
 off_t Fd::getLength() {
   if (seemsOk()) {
-    struct stat filestat;
-    if (fstat(fd, &filestat) == 0) {
-      return length = filestat.st_size;
+    if (!statted) {
+      if (!stat()) {
+        return -1;
+      }
     }
+    return filestat.st_size;
   }
   return -1;
 }
 
 long int Fd::getPosition() {
   return lseek (fd, 0, SEEK_CUR);
+}
+
+bool Fd::isDir() {
+  return S_ISDIR(filestat.st_mode);
+}
+
+bool Fd::isRegularFile() {
+  return !S_ISREG(filestat.st_mode);
 }
 
 size_t Fd::printf(const char *format, ...) {

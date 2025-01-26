@@ -80,3 +80,30 @@ ByteRange ByteRange::canonical(__off_t st_size) {
   }
   return resolved;
 }
+
+bool ByteRange::restrictTo(const ByteRange &subset) {
+
+  if (!subset.begin.given) {
+    begin = end-subset.end;//todo: off by one
+    if (begin < 0) {
+      begin = 0;
+    }
+  }
+  if (!subset.end.given) {
+//todo:00 complete this logic!
+  }
+  return true;
+}
+
+off_t ByteRange::getLength() const {
+  if (!begin.given && !end.given) {
+    return 0;
+  }
+  if (!begin.given) {
+    return end.number;
+  }
+  if (!end.given) {
+    return -1;
+  }
+  return end-begin;//todo:00 off by one
+}

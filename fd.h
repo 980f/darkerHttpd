@@ -1,20 +1,38 @@
 #pragma once
 #include <cstdio>
+#include <cstring>
 #include <unistd.h>
+#include <sys/stat.h>
 /**
 // Created by andyh on 1/19/25.
 // Copyright (c) 2025 Andy Heilveil, (github/980f). All rights reserved.
 */
 
 namespace DarkHttpd {
+  /**add conveniences to file stat struct */
+  struct Fstat : stat {
+    void clear() {
+      memset(this, 0, sizeof(stat));
+    }
+
+    Fstat() {
+      clear();
+    }
+  };
+
   class Fd {
   protected:
     int fd = -1;
+    Fstat filestat;
+    bool statted = false;
+    /* ensure stat is up-to-date*/
+    bool stat() {
+      return statted = (fstat(fd, &filestat) == 0);
+    }
+
     FILE *stream = nullptr;
     //this is the filename after createTemp is called, and it lingers after the file is closed. TODO: this doesn't actually work. We will need to keep the file open when passing it to sendfile.
     char tmpname[L_tmpnam];
-  public: //temporary during code construction, this is carelessly cached.
-    size_t length = 0;
 
   public:
     FILE *getStream() { //this "create at need"
@@ -27,7 +45,6 @@ namespace DarkHttpd {
       return stream;
     }
 
-  public:
     // ReSharper disable once CppNonExplicitConversionOperator
     operator int() const {
       return fd;
@@ -94,6 +111,18 @@ namespace DarkHttpd {
     off_t getLength();
 
     long int getPosition();
+
+    bool isDir();
+
+    bool isRegularFile();
+
+    time_t getModificationTimestamp() {
+      if (statted || stat()) {
+        return filestat.st_mtime;
+      } else {
+        return 0;
+      }
+    }
 
     Fd() = default;
 

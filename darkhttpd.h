@@ -37,6 +37,7 @@
 #include "darklogger.h"
 #include "stringview.h"
 #include "checkFormatArgs.h"
+#include "dropprivilege.h"
 #include "fd.h"
 #include "mimer.h"
 #include "now.h"
@@ -46,7 +47,6 @@
 #include <cstring>
 #include <cstdint>
 #include <cstdio>
-#include <dropprivilege.h>
 #include <forward_list>
 
 
@@ -139,24 +139,34 @@ namespace DarkHttpd {
 
       struct Block {
         Fd fd;
-        bool dont_free = false;
+        // bool dont_free = false;
         //altering range begin rather than having a separate variable which usually was added to it dynamically  size_t sent = 0;
         ByteRange range; //tracks sending.
+
+
         void recycle(bool andForget);
-
-        void clear() {
-          if (!dont_free) {
-            fd.unlink();
-          }
-        }
-
         void recordSize() {
           range.setForSize(fd.getPosition());
+        }
+
+        void statSize() {
+          range.setForSize(fd.getLength()); //we'll apply request range to this momentarily
         }
 
         FILE *createTemp();
 
         off_t getLength();
+
+        /** @returns whether we have a good range and good fd
+         * this is a key functionality, its logic must be based on httpd, not personal opinion of what makes a file good or bad.
+         */
+        bool operator!() {
+          return !fd.seemsOk() || getLength()<0;
+        }
+
+        bool isRegularFile() {
+          return fd.isRegularFile();
+        }
       };
 
       Block header;

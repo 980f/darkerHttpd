@@ -4,6 +4,7 @@
 */
 
 #pragma once
+
 #include "stringview.h"
 
 /** started as HTTP ranges header, and parser thereof. Gets used for file transmission state tracking.*/
@@ -32,6 +33,9 @@ struct ByteRange {
   Bound begin;
   Bound end;
 
+  bool operator!() const {
+    return !begin.given && !end.given;
+  }
   int parse(StringView headerline);
 
   void clear() {
@@ -49,11 +53,12 @@ struct ByteRange {
   /** convert 'not given' to a concrete value such as 0 */
   ByteRange canonical(__off_t st_Size);
 
+  /** reduce range to that of  @param subset */
+  bool restrictTo(const ByteRange & subset);
+
   ByteRange() {
     clear();
   }
 
-  off_t getLength() const {
-    return end-begin;//todo:00 off by one
-  }
+  off_t getLength() const;
 };
