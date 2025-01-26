@@ -25,9 +25,10 @@
  *
  * It has been heavily modified to make it a module that can be included in other programs.
  * removed "single file" concept, use a directory with just the one file in it, via a file link, rather than having lots of code in this program for such a rare occurrence. A file glob filter would be a better feature.
- * todo: conditional compile for forwarding   DarklySupportForwarding
- * todo: conditional compile for daemon       DarklySupportDaemon
+ * done: conditional compile for forwarding   DarklySupportForwarding
+ * done: conditional compile for daemon       DarklySupportDaemon
  * todo: usage fragments in each module, paired with parameter settings.
+ * todo: file offset and range logic is off by one. Will probably use half-open interval internal, modifying transmitted and parsed values which are fully closed.
  */
 
 #pragma once
@@ -43,20 +44,14 @@
 
 #include <vector>
 #include <cstring>
-#include <fcntl.h>
-#include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <dropprivilege.h>
-#include <unistd.h>
 #include <forward_list>
 
-#include <locale>
-#include <logger.h>
 
 #include <netinet/in.h>
 #include <sys/stat.h>
-#include <sys/syslog.h>
 
 /** build options */
 #ifndef NO_IPV6
@@ -86,7 +81,7 @@ namespace DarkHttpd {
     Now last_active = 0;
 
     enum {
-      BORN=0, /* constructed, not fully initialized */
+      BORN = 0, /* constructed, not fully initialized */
       RECV_REQUEST, /* receiving request */
       SEND_HEADER, /* sending generated header */
       SEND_REPLY, /* sending reply */
@@ -120,7 +115,8 @@ namespace DarkHttpd {
         bool dieNow = true;
         unsigned requested = 0;
         unsigned max = 0;
-        bool timeToDie(time_t beenAlive );
+
+        bool timeToDie(time_t beenAlive);
 
         unsigned &cli_timeout;
 
@@ -129,22 +125,23 @@ namespace DarkHttpd {
 
       void clear();
 
-      Request(unsigned  &cli_timeout);
+      Request(unsigned &cli_timeout);
 
       bool parse();
+
       /* call recv on the socket */
       ssize_t receive(int socket);
     } rq;
 
     struct Replier {
       int http_code = 0;
-      bool header_only = false;
+      bool header_only = false; //todo: this is ugly, should be in range of checking get vs head and content size.
 
       struct Block {
         Fd fd;
         bool dont_free = false;
         size_t sent = 0;
-
+        ByteRange range; //tracks sending.
         void recycle(bool andForget);
 
         void clear() {
@@ -153,21 +150,21 @@ namespace DarkHttpd {
           }
         }
 
+        void recordSize() {
+          range.setForSize(fd.getPosition());
+        }
+
         FILE *createTemp();
+
+        off_t getLength();
       };
 
       Block header;
       Block content;
-
-      off_t start = 0;
-      off_t file_length = 0;
-      // off_t total_sent = 0;
+      //which block is in progress, null while not sending anything.
+      Block *sending = nullptr;
 
       void clear();
-
-      off_t getContentLength() {
-        return content.fd.getLength();
-      }
     } reply;
 
     /* header + body = total, for logging */

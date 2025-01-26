@@ -68,6 +68,10 @@ off_t Fd::getLength() {
   return -1;
 }
 
+long int Fd::getPosition() {
+  return lseek (fd, 0, SEEK_CUR);
+}
+
 size_t Fd::printf(const char *format, ...) {
   FILE *stream = getStream();
   va_list args;

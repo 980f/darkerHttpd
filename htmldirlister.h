@@ -146,7 +146,7 @@ public:
     conn.addFooter();
     conn.endReply();
 
-    conn.startCommonHeader(200, "OK", conn.reply.file_length);
+    conn.startCommonHeader(200, "OK", conn.reply.content.fd.length);
     conn.catFixed("Content-Type: text/html; charset=UTF-8\r\n");
     conn.endHeader();
   }

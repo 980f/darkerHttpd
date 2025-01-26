@@ -31,6 +31,7 @@
 #include "addr6.h"
 #include "base64getter.h"
 #include <cheaptricks.h>
+#include <fcntl.h>
 #include <logger.h>
 
 #include "cliscanner.h"
@@ -698,6 +699,14 @@ FILE *Connection::Replier::Block::createTemp() {
   return fd.createTemp("darkerhttpdXXXXXX");
 }
 
+off_t Connection::Replier::Block::getLength() {
+  if (range.begin.given&& range.end.given) {
+    return range.end.given - range.begin.given;
+  } else {
+    return -1;
+  }
+}
+
 void Connection::Replier::clear() {
   header_only = false;
   http_code = 0;
@@ -705,8 +714,8 @@ void Connection::Replier::clear() {
   header.recycle(false);
   content.recycle(true);
 
-  start = 0;
-  file_length = 0;
+  // start = 0;
+  // file_length = 0;
 }
 
 Connection::Connection(Server &parent, int fd): socket(fd), service(parent), rq(service.timeout_secs), reply{} {
@@ -877,7 +886,8 @@ void Connection::catGeneratedOn(bool toReply) {
 
 void Connection::endHeader() {
   reply.header.fd.printf("\r\n");
-  reply.header.fd.close(); //todo: but we need the name so that we can pass that to sendfile.
+  reply.header.recordSize();
+  //too soon, not until after sending completes. reply.header.fd.close(); //todo: but we need the name so that we can pass that to sendfile.
 }
 
 void Connection::startReply(int errcode, const char *errtext) {
@@ -901,20 +911,18 @@ void Connection::error_reply(const int errcode, const char *errname, const char 
   addFooter();
   endReply();
 
-  //todo:file_length is not related to the file length!
-  startCommonHeader(errcode, errname, reply.file_length);
+  startCommonHeader(errcode, errname, reply.content.getLength());
   catFixed("Content-Type: text/html; charset=UTF-8\r\n"); //todo: use catMime();
   catAuth();
   endHeader();
 
   reply.header_only = false;
-  /* Reset reply_start in case the request set a range. */
-  reply.start = 0;
+
 }
 
 void Connection::endReply() {
-  reply.content.fd.close();
-  reply.getContentLength();
+  reply.content.recordSize();
+  //too soon, don't close until after sent.  reply.content.fd.close();
 }
 
 void Connection::redirect(const char *proto, const char *hostname, const char *url) {
@@ -949,7 +957,7 @@ void Connection::redirect(const char *proto, const char *hostname, const char *u
   reply.content.fd.printf("Location: %s%s\r\n", hostname, url);
   catKeepAlive();
   catCustomHeaders();
-  catContentLength(reply.file_length);
+  catContentLength(reply.content.getLength());
   catFixed("Content-Type: text/html; charset=UTF-8\r\n"); //todo: use catMime();
   //no auth?
   endHeader();
@@ -1134,7 +1142,7 @@ void Connection::process_get() {
     error_reply(500, "Internal Server Error", "fstat() failed: %s.", strerror(errno));
     return;
   }
-  reply.file_length = filestat.st_size;
+  reply.content.range.setForSize( filestat.st_size);//we'll apply request range to this momentarily
 
   /* make sure it's a regular file */
   if (S_ISDIR(filestat.st_mode)) {
@@ -1170,15 +1178,14 @@ void Connection::process_get() {
     error_reply(416, "Requested Range Not Satisfiable", "You requested a backward range.");
     return;
   }
-  reply.start = actual.begin;
-  reply.file_length = actual.end - actual.begin + 1;
+  reply.content.range= actual;
 
-  startCommonHeader(206, "Partial Content", reply.file_length);
+  startCommonHeader(206, "Partial Content", reply.content.getLength());
   reply.header.fd.printf("Content-Range: bytes %llu-%llu/%llu\r\n", llu(actual.begin), llu(actual.end), llu(filestat.st_size));
 
   debug("sending %llu-%llu/%llu\n", llu(actual.begin), llu(actual.end), llu(filestat.st_size));
 
-  startCommonHeader(200, "OK", reply.file_length);
+  // startCommonHeader(200, "OK", reply.file_length);
 
   reply.header.fd.printf("Content-Type: %s\r\n", mimetype);
   reply.header.fd.printf("Last-Modified: %s\r\n", lastmod);
@@ -1265,8 +1272,9 @@ void Connection::poll_send_header() {
 
   assert(state == SEND_HEADER);
   // assert(header.length == strlen(header));
+  reply.sending=&reply.header;
 
-  sent = send_from_file(socket, reply.header.fd, 0, reply.header.fd.getLength());
+  sent = send_from_file(socket, reply.sending->fd, 0, reply.sending->getLength());
   last_active = service.now;
   debug("poll_send_header(%d) sent %d bytes\n", int(socket), (int) sent);
 
@@ -1284,11 +1292,11 @@ void Connection::poll_send_header() {
     return;
   }
   assert(sent > 0);
-  reply.header.sent += sent;
+  reply.sending->sent += sent;
   service.fyi.total_out += sent;
 
   /* check if we're done sending header */
-  if (reply.header.sent == reply.header.fd.length) {
+  if (reply.sending->sent+reply.sending->range.begin == reply.sending->range.end) {
     if (reply.header_only) {
       state = DONE;
     } else {
@@ -1373,21 +1381,23 @@ void Connection::poll_send_reply() {
   assert(state == SEND_REPLY);
   assert(!reply.header_only);
 
+  reply.sending=&reply.header;
+
   /* off_t of file_length can be wider than size_t, avoid overflow in send_len */
   const size_t max_size_t = ~0;
-  off_t send_len = reply.file_length - reply.content.sent;
+  off_t send_len = reply.sending->getLength() - reply.sending->sent;
   if (send_len > max_size_t) {
     send_len = max_size_t;
   }
   errno = 0;
-  assert(reply.file_length >= reply.content.sent);
-  sent = send_from_file(socket, reply.content.fd, reply.start + reply.content.sent, send_len);
+  // assert(reply.file_length >= reply.content.sent);
+  sent = send_from_file(socket, reply.sending->fd, reply.sending->range.begin + reply.content.sent, send_len);
   if (sent < 1) {
     debug("send_from_file returned %lld (errno=%d %s)\n", llu(sent), errno, strerror(errno));
   }
 
   last_active = service.now;
-  debug("poll_send_reply(%d) sent %ld: %llu+[%llu-%llu] of %llu\n", int(socket), sent, llu(reply.start), llu(reply.content.sent), llu(reply.content.sent + sent - 1), llu(reply.file_length));
+  debug("poll_send_reply(%d) sent %ld: %llu+[%llu-%llu] of %llu\n", int(socket), sent, llu(reply.sending->range.begin), llu(reply.content.sent), llu(reply.content.sent + sent - 1), llu(reply.sending->getLength()));
 
   /* handle any errors (-1) or closure (0) in send() */
   if (sent < 1) {
@@ -1404,11 +1414,11 @@ void Connection::poll_send_reply() {
     state = DONE;
     return;
   }
-  reply.content.sent += sent;
+  reply.sending->sent += sent;
   service.fyi.total_out += sent;
 
   /* check if we're done sending */
-  if (reply.content.sent == reply.file_length) {
+  if (reply.sending->sent + reply.sending->range.begin == reply.sending->range.end) {
     state = DONE;
   }
 }

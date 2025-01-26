@@ -11,7 +11,7 @@ namespace DarkHttpd {
   protected:
     int fd = -1;
     FILE *stream = nullptr;
-    //this is the filename after createTemp is called, and it lingers after the file is closed.
+    //this is the filename after createTemp is called, and it lingers after the file is closed. TODO: this doesn't actually work. We will need to keep the file open when passing it to sendfile.
     char tmpname[L_tmpnam];
   public: //temporary during code construction, this is carelessly cached.
     size_t length = 0;
@@ -92,6 +92,8 @@ namespace DarkHttpd {
     }
 
     off_t getLength();
+
+    long int getPosition();
 
     Fd() = default;
 
