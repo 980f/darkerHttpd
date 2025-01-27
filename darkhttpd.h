@@ -78,7 +78,7 @@ namespace DarkHttpd {
 #else
     in_addr_t client;
 #endif
-    Now last_active = 0;
+    NanoSeconds last_active = 0;
 
     enum {
       BORN = 0, /* constructed, not fully initialized */
@@ -307,7 +307,8 @@ namespace DarkHttpd {
     /** the entries will all be dynamically allocated */
     std::forward_list<Connection *> connections;
 
-    Now now;
+    // /* this is now redundant and also stale when compared to the EpollerCore::elapsed */
+    // Now now;
 
     void change_root();
 
@@ -374,7 +375,7 @@ namespace DarkHttpd {
 #endif
 
   public:
-    Server(): epoller{} {
+    Server() {
       forSignals = this;
     }
 
@@ -446,6 +447,14 @@ namespace DarkHttpd {
     bool parse_commandline(int argc, char *argv[]);
 
     int main(int argc, char **argv);
+
+    time_t since(const NanoSeconds &lastActive) const;
+
+    time_t now() const {
+      return epoller.elapsed.seconds();
+    }
+
+    const char* timetText();
   };
 
 
