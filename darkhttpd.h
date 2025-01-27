@@ -42,7 +42,7 @@
 #include "mimer.h"
 #include "now.h"
 
-
+#include "epoller.h"
 #include <vector>
 #include <cstring>
 #include <cstdint>
@@ -70,7 +70,7 @@ class DarkException;
 namespace DarkHttpd {
   class Server; //server and connection know about each other. Can subclass the shared part and have a clean hierarchy.
 
-  struct Connection {
+  struct Connection : EpollHandler {
     Fd socket;
     Server &service;
 #ifdef HAVE_INET6
@@ -145,6 +145,7 @@ namespace DarkHttpd {
 
 
         void recycle(bool andForget);
+
         void recordSize() {
           range.setForSize(fd.getPosition());
         }
@@ -161,7 +162,7 @@ namespace DarkHttpd {
          * this is a key functionality, its logic must be based on httpd, not personal opinion of what makes a file good or bad.
          */
         bool operator!() {
-          return !fd.seemsOk() || getLength()<0;
+          return !fd.seemsOk() || getLength() < 0;
         }
 
         bool isRegularFile() {
@@ -175,8 +176,11 @@ namespace DarkHttpd {
       void clear();
     } reply;
 
-    /* header + body = total, for logging */
-  public:
+    /* epoll event handler for a connection */
+    void onEpoll(unsigned epoll_flags) override;
+
+    ~Connection();
+
     void logOn(DarkLogger *log);
 
     Connection(Server &parent, int fd); //only called via new in socket acceptor code.
@@ -264,6 +268,9 @@ namespace DarkHttpd {
     unsigned timeout_secs = 30;
     bool want_keepalive = true;
 
+    /* the number below should be #defined in user build system to something like maximum number of events to handle per millisecond or so */
+    Epoller<22> epoller;
+
     /** add pretty printer for local types. */
     struct ReallyDarkLogger : DarkLogger {
       void put(Connection::Request::HttpMethods method);
@@ -316,7 +323,7 @@ namespace DarkHttpd {
 
     void accept_connection();
 
-    void log_connection(const Connection *conn);
+    // void log_connection(const Connection *conn);
 
   protected: //things connection can use
 
@@ -367,7 +374,7 @@ namespace DarkHttpd {
 #endif
 
   public:
-    Server() {
+    Server(): epoller{} {
       forSignals = this;
     }
 

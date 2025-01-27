@@ -34,6 +34,7 @@
 #include <fcntl.h>
 #include <limits>
 #include <logger.h>
+#include <sys/epoll.h>
 
 #include "cliscanner.h"
 #include "directorylisting.h"
@@ -452,7 +453,7 @@ void Server::init_sockin() {
 #if DarklySupportAcceptanceFilter
   /* enable acceptfilter (this is only available on FreeBSD) */
   if (want_accf) {
-
+    //todo: shouldn't this be done before we start listening? Doing it after seems to open up a window in which unacceptible connections can queue.
     struct accept_filter_arg filt = {"httpready", ""};
     if (setsockopt(sockin, SOL_SOCKET, SO_ACCEPTFILTER, &filt, sizeof(filt)) == -1) {
       fprintf(stderr, "cannot enable acceptfilter: %s\n", strerror(errno));
@@ -462,6 +463,7 @@ void Server::init_sockin() {
   }
 
 #endif
+  epoller.watch(sockin,EPOLLIN, *reinterpret_cast<EpollHandler *>(this)); //the connection socket only has read events. Probably needs HUP's as well though ...
 }
 
 void Server::usage(const char *argv0) {
@@ -725,6 +727,7 @@ void Server::accept_connection() {
   conn = new Connection(*this, fd);
   // conn->clear(); //in case we someday pull from pool instead of malloc.
   connections.push_front(conn);
+  epoller.watch(fd,EPOLLIN | EPOLLOUT | EPOLLHUP, *reinterpret_cast<EpollHandler *>(this)); //todo: perhaps other EPOLLxxx are needed to catch all connection events?
 
 #ifdef HAVE_INET6
   if (inet6) {
@@ -779,7 +782,31 @@ void Connection::Replier::clear() {
   http_code = 0;
 
   header.recycle(true);
-  content.recycle(true);//todo:1 might be conditional on actual file vs generated content.
+  content.recycle(true); //todo:1 might be conditional on actual file vs generated content.
+}
+
+void Connection::onEpoll(unsigned epoll_flags) {
+  if (epoll_flags & EPOLLIN) {
+    if (state == RECV_REQUEST) {
+      poll_recv_request();
+    } else {
+      //todo: debug("unexpected input, busy with output or already DONE);
+    }
+  }
+  if (epoll_flags & EPOLLOUT) {
+    if (state == SEND_HEADER) {
+      poll_send_header();
+    } else if (state == SEND_REPLY) {
+      poll_send_reply();
+    } else {
+      //todo: debug("unexpected output notification, while ....");
+    }
+  }
+}
+
+Connection::~Connection() {
+  recycle(); //for memory leak test, which should be moot now that we have gotten rid of all dynamically allocated chunks.
+  service.epoller.remove(socket);
 }
 
 Connection::Connection(Server &parent, int fd): socket(fd), service(parent), rq(service.timeout_secs), reply{} {
@@ -1200,7 +1227,7 @@ void Connection::process_get() {
     return;
   }
 
-  reply.content.statSize();//start with full possible size, reduce to requested range later.
+  reply.content.statSize(); //start with full possible size, reduce to requested range later.
 
   if (!reply.content) {
     error_reply(500, "Internal Server Error", "fstat() failed: %s.", strerror(errno));
@@ -1238,7 +1265,7 @@ void Connection::process_get() {
   }
   debug("sending %llu-%llu/%llu\n", llu(reply.content.range.begin), llu(reply.content.range.end), llu(reply.content.fd.getLength()));
 
-  reply.header.fd.printf("Content-Range: bytes %llu-%llu/%llu\r\n", llu(reply.content.range.begin), llu(reply.content.range.end), llu(reply.content.fd.getLength()));//may make this conditional on a partial range.if so just move it into the above 'if'
+  reply.header.fd.printf("Content-Range: bytes %llu-%llu/%llu\r\n", llu(reply.content.range.begin), llu(reply.content.range.end), llu(reply.content.fd.getLength())); //may make this conditional on a partial range.if so just move it into the above 'if'
   reply.header.fd.printf("Content-Type: %s\r\n", mimetype);
   reply.header.fd.printf("Last-Modified: %s\r\n", lastmod);
   endHeader();
@@ -1403,142 +1430,89 @@ void Connection::urlDoDirectory() {
  * connections, handle receiving of requests, and sending of replies.
  */
 void Server::httpd_poll() {
-  bool bother_with_timeout = false;
+  // bool bother_with_timeout = false;
 
-  timeval timeout;
-  timeout.tv_sec = timeout_secs;
-  timeout.tv_usec = 0;
+  NanoSeconds timeout(timeout_secs);
+  //
+  // if (accepting) {
+  //   epoller.watch(sockin,EPOLLIN,nullptr);
+  // }
+  //
+  // for (auto conn: connections) {
+  //   switch (conn->state) {
+  //     case Connection::DONE:
+  //       /* do nothing, no connection should be left in this state for long */
+  //         //might to a prophylactic removal of watch
+  //       break;
+  //
+  //     //original code only listens to reads when not 'done' or 'sending'. Done should not be a state!
+  //     case Connection::RECV_REQUEST:
+  //       epoller.watch()
+  //       MAX_FD_SET(int(conn->socket), &recv_set);
+  //       bother_with_timeout = true;
+  //       break;
+  //
+  //     case Connection::SEND_HEADER:
+  //     case Connection::SEND_REPLY:
+  //       MAX_FD_SET(int(conn->socket), &send_set);
+  //       bother_with_timeout = true;
+  //       break;
+  //     default:
+  //       break;
+  //   }
+  // }
 
-  fd_set recv_set;
-  FD_ZERO(&recv_set);
-  fd_set send_set;
-  FD_ZERO(&send_set);
-  int max_fd = 0;
 
-  /* set recv/send fd_sets */
-#define MAX_FD_SET(sock, fdset)               \
-  do {                                        \
-    FD_SET(sock, fdset);                      \
-    max_fd = (max_fd < sock) ? sock : max_fd; \
-  } while (0)
+  // if (timeout_secs == 0) {
+  //   bother_with_timeout = false;
+  // }
 
-  if (accepting) {
-    MAX_FD_SET(int(sockin), &recv_set);
-  }
+  //todo: use safely stopwatch instead of reimplementing it inline
+  // timeval t0;
+  // if (debug("select() with max_fd %d timeout %d\n", max_fd, bother_with_timeout ? (int) timeout.tv_sec : 0)) {
+  //   gettimeofday(&t0, nullptr);
+  // }
+  if (epoller.loop(timeout)) {
+    /* update time */
+    now.refresh(); //read clock and textify
 
-  for (auto conn: connections) {
-    switch (conn->state) {
-      case Connection::DONE:
-        /* do nothing, no connection should be left in this state */
-        break;
+    // /* poll connections that select() says need attention */
+    // if (FD_ISSET(int(sockin), &recv_set)) {
+    //   accept_connection();
+    // }
 
-      //original code only listens to reads when not 'done' or 'sending'. Done should not be a state!
-      case Connection::RECV_REQUEST:
-        MAX_FD_SET(int(conn->socket), &recv_set);
-        bother_with_timeout = true;
-        break;
+    for (auto conn: connections) {
+      // conn->poll_check_timeout();
+      // int socket = conn->socket;
 
-      case Connection::SEND_HEADER:
-      case Connection::SEND_REPLY:
-        MAX_FD_SET(int(conn->socket), &send_set);
-        bother_with_timeout = true;
-        break;
-      default:
-        break;
-    }
-  }
-#undef MAX_FD_SET
-
-#if defined(__has_feature)
-#if __has_feature(memory_sanitizer)
-  __msan_unpoison(&recv_set, sizeof(recv_set));
-  __msan_unpoison(&send_set, sizeof(send_set));
-#endif
-#endif
-
-  /* -select- */
-  if (timeout_secs == 0) {
-    bother_with_timeout = false;
-  }
-
-  timeval t0;
-  if (debug("select() with max_fd %d timeout %d\n", max_fd, bother_with_timeout ? (int) timeout.tv_sec : 0)) {
-    gettimeofday(&t0, nullptr);
-  }
-  int select_ret = select(max_fd + 1, &recv_set, &send_set, nullptr, bother_with_timeout ? &timeout : nullptr);
-  if (select_ret == 0) {
-    if (!bother_with_timeout) {
-      err(-1, "select() timed out");
-    }
-  }
-  if (select_ret == -1) {
-    if (errno == EINTR) {
-      return; /* interrupted by signal */
-    } else {
-      err(1, "select() failed");
-    }
-  }
-  if (debug(nullptr)) {
-    timeval t1;
-    gettimeofday(&t1, nullptr);
-    long long sec = t1.tv_sec - t0.tv_sec;
-    long long usec = t1.tv_usec - t0.tv_usec;
-    if (usec < 0) {
-      usec += 1000000;
-      sec--;
-    }
-    printf("select() returned %d after %lld.%06lld secs\n", select_ret, sec, usec);
-  }
-
-  /* update time */
-  now.refresh(); //read clock and textify
-
-  /* poll connections that select() says need attention */
-  if (FD_ISSET(int(sockin), &recv_set)) {
-    accept_connection();
-  }
-
-  for (auto conn: connections) {
-    conn->poll_check_timeout();
-    int socket = conn->socket;
-    switch (conn->state) {
-      case Connection::RECV_REQUEST:
-        if (FD_ISSET(socket, &recv_set)) {
-          conn->poll_recv_request();
+      //
+      /* Handling SEND_REPLY could have set the state to done. */
+      if (conn->state == Connection::DONE) {
+        /* clean out finished connection */
+        if (conn->rq.keepalive.dieNow) {
+          //todo: return to pool rather than immediately discarding
+          connections.remove(conn);
+          delete conn;
+        } else { //keeping alive.
+          conn->clear();
         }
-        break;
-
-      case Connection::SEND_HEADER:
-        if (FD_ISSET(socket, &send_set)) {
-          conn->poll_send_header();
-        }
-        break;
-
-      case Connection::SEND_REPLY:
-        if (FD_ISSET(socket, &send_set)) {
-          conn->poll_send_reply();
-        }
-        break;
-
-      case Connection::DONE:
-        /* (handled later; ignore for now as it's a valid state) */
-        break;
-      default:
-        break;
-    }
-
-    /* Handling SEND_REPLY could have set the state to done. */
-    if (conn->state == Connection::DONE) {
-      /* clean out finished connection */
-      if (conn->rq.keepalive.dieNow) {
-        //todo: return to pool rather than immediately discarding
-        connections.remove(conn);
-        conn->recycle();
-      } else { //keeping alive.
-        conn->clear();
       }
     }
+  } else {
+    //todo: debug message about failed poll attempt
   }
+
+  // if (debug(nullptr)) {
+  //   timeval t1;
+  //   gettimeofday(&t1, nullptr);
+  //   long long sec = t1.tv_sec - t0.tv_sec;
+  //   long long usec = t1.tv_usec - t0.tv_usec;
+  //   if (usec < 0) {
+  //     usec += 1000000;
+  //     sec--;
+  //   }
+  //   printf("select() returned %d after %lld.%06lld secs\n", select_ret, sec, usec);
+  // }
 }
 
 #if DarklySupportDaemon

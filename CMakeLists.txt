@@ -38,6 +38,8 @@ target_compile_definitions(darkerhttpd PUBLIC
   DarklySupportForwarding=0
   DarklySupportDaemon=0
   DarklySuppportAcceptanceFilters=0
+  SafelyIoSourceEvents=20
+  SafelyApplicationEvents=6
 )
 
 
